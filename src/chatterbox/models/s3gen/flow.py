@@ -160,44 +160,13 @@ class MaskedDiffWithXvec(torch.nn.Module):
                 # Handle case where prompt_token_len is a scalar
                 prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
         elif prompt_token.shape[0] != token.shape[0]:
-            # Mismatch indicates different tensor semantics - skip batch processing logic
+            # Mismatch that we can't handle - fall back to original behavior for single inference
             import logging
             logger = logging.getLogger(__name__)
             logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
-            # This usually means prompt_token is [seq_len, features] and token is [batch, seq_len]
-            # In this case, the original concatenation should work as-is
+            # For single inference case, this might be normal - skip batch processing logic
 
-        # Handle concatenation with proper shape alignment
-        # Check for dimension mismatch and fix it before concatenation
-        if prompt_token.shape[0] != token.shape[0]:
-            if prompt_token.shape[0] > 1 and token.shape[0] == 1:
-                # prompt_token is [batch_size, seq_len], token is [1, seq_len]
-                # Expand token to match prompt_token batch size
-                token = token.expand(prompt_token.shape[0], -1)
-                if isinstance(token_len, torch.Tensor):
-                    if token_len.numel() == 1:
-                        token_len = token_len.expand(prompt_token.shape[0])
-                else:
-                    token_len = torch.tensor([token_len] * prompt_token.shape[0], device=token.device)
-            elif prompt_token.shape[0] == 1 and token.shape[0] > 1:
-                # prompt_token is [1, seq_len], token is [batch_size, seq_len]
-                # Expand prompt_token to match token batch size
-                prompt_token = prompt_token.expand(token.shape[0], -1)
-                if isinstance(prompt_token_len, torch.Tensor):
-                    if prompt_token_len.numel() == 1:
-                        prompt_token_len = prompt_token_len.expand(token.shape[0])
-                else:
-                    prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
-            else:
-                logger.warning(f"Unexpected batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
-
-        # Now attempt concatenation
-        try:
-            token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
-        except RuntimeError as e:
-            logger.error(f"Concatenation still failed after shape alignment: {e}")
-            logger.error(f"Final shapes - prompt_token: {prompt_token.shape}, token: {token.shape}")
-            raise e
+        token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
         
         # Check for out-of-bounds token IDs
@@ -218,13 +187,7 @@ class MaskedDiffWithXvec(torch.nn.Module):
 
         # Handle prompt_feat batch dimension
         if prompt_feat.shape[0] != batch_size:
-            if prompt_feat.shape[0] == 1:
-                # Can expand from 1 to batch_size
-                prompt_feat = prompt_feat.expand(batch_size, -1, -1)
-            else:
-                # Incompatible batch sizes - use first item as broadcast
-                logger.warning(f"prompt_feat batch size mismatch: {prompt_feat.shape[0]} vs {batch_size}, using first item")
-                prompt_feat = prompt_feat[0:1].expand(batch_size, -1, -1)
+            prompt_feat = prompt_feat.expand(batch_size, -1, -1)
 
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
@@ -343,37 +306,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             # Mismatch that we can't handle - this might indicate a problem
             logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
 
-        # Handle concatenation with proper shape alignment
-        # Check for dimension mismatch and fix it before concatenation
-        if prompt_token.shape[0] != token.shape[0]:
-            if prompt_token.shape[0] > 1 and token.shape[0] == 1:
-                # prompt_token is [batch_size, seq_len], token is [1, seq_len]
-                # Expand token to match prompt_token batch size
-                token = token.expand(prompt_token.shape[0], -1)
-                if isinstance(token_len, torch.Tensor):
-                    if token_len.numel() == 1:
-                        token_len = token_len.expand(prompt_token.shape[0])
-                else:
-                    token_len = torch.tensor([token_len] * prompt_token.shape[0], device=token.device)
-            elif prompt_token.shape[0] == 1 and token.shape[0] > 1:
-                # prompt_token is [1, seq_len], token is [batch_size, seq_len]
-                # Expand prompt_token to match token batch size
-                prompt_token = prompt_token.expand(token.shape[0], -1)
-                if isinstance(prompt_token_len, torch.Tensor):
-                    if prompt_token_len.numel() == 1:
-                        prompt_token_len = prompt_token_len.expand(token.shape[0])
-                else:
-                    prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
-            else:
-                logger.warning(f"Unexpected batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
-
-        # Now attempt concatenation
-        try:
-            token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
-        except RuntimeError as e:
-            logger.error(f"Concatenation still failed after shape alignment: {e}")
-            logger.error(f"Final shapes - prompt_token: {prompt_token.shape}, token: {token.shape}")
-            raise e
+        token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
         token = self.input_embedding(torch.clamp(token, min=0, max=self.input_embedding.num_embeddings-1)) * mask
 
@@ -389,13 +322,7 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
 
         # Handle prompt_feat batch dimension
         if prompt_feat.shape[0] != batch_size:
-            if prompt_feat.shape[0] == 1:
-                # Can expand from 1 to batch_size
-                prompt_feat = prompt_feat.expand(batch_size, -1, -1)
-            else:
-                # Incompatible batch sizes - use first item as broadcast
-                logger.warning(f"prompt_feat batch size mismatch: {prompt_feat.shape[0]} vs {batch_size}, using first item")
-                prompt_feat = prompt_feat[0:1].expand(batch_size, -1, -1)
+            prompt_feat = prompt_feat.expand(batch_size, -1, -1)
 
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
