@@ -270,3 +270,129 @@ class ChatterboxTTS:
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
+    def generate_batch(
+        self,
+        texts,
+        repetition_penalty=1.2,
+        min_p=0.05,
+        top_p=1.0,
+        audio_prompt_path=None,
+        exaggeration=0.5,
+        cfg_weight=0.5,
+        temperature=0.8,
+    ):
+        """
+        Generate speech for multiple text inputs with the same voice and parameters.
+        Uses true batch processing for improved performance.
+
+        Args:
+            texts (list): List of text strings to convert to speech
+            repetition_penalty (float): Repetition penalty for text generation
+            min_p (float): Minimum probability threshold for token sampling
+            top_p (float): Top-p (nucleus) sampling parameter
+            audio_prompt_path (str, optional): Path to audio file for voice conditioning
+            exaggeration (float): Emotion exaggeration factor
+            cfg_weight (float): Classifier-free guidance weight
+            temperature (float): Sampling temperature
+
+        Returns:
+            list: List of torch tensors containing the generated audio waveforms
+        """
+        if not isinstance(texts, list):
+            raise ValueError("texts must be a list of strings")
+
+        if len(texts) == 0:
+            return []
+
+        # Prepare conditionals once for the entire batch
+        if audio_prompt_path:
+            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        else:
+            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+
+        # Update exaggeration if needed
+        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
+            _cond: T3Cond = self.conds.t3
+            self.conds.t3 = T3Cond(
+                speaker_emb=_cond.speaker_emb,
+                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                emotion_adv=exaggeration * torch.ones(1, 1, 1),
+            ).to(device=self.device)
+
+        # Batch tokenize all texts
+        normalized_texts = [punc_norm(text) for text in texts]
+        all_text_tokens = []
+
+        for text in normalized_texts:
+            text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
+            if cfg_weight > 0.0:
+                text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+
+            sot = self.t3.hp.start_text_token
+            eot = self.t3.hp.stop_text_token
+            text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+            text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+            all_text_tokens.append(text_tokens)
+
+        # Pad to same length for batch processing
+        max_len = max(tokens.size(1) for tokens in all_text_tokens)
+        padded_tokens = []
+        for tokens in all_text_tokens:
+            if tokens.size(1) < max_len:
+                pad_size = max_len - tokens.size(1)
+                tokens = F.pad(tokens, (0, pad_size), value=self.t3.hp.stop_text_token)
+            padded_tokens.append(tokens)
+
+        # Stack into batch tensor
+        batch_text_tokens = torch.cat(padded_tokens, dim=0)  # (batch_size * cfg_multiplier, max_len)
+
+        # Expand conditioning for batch size (create contiguous tensors)
+        batch_conds = T3Cond(
+            speaker_emb=self.conds.t3.speaker_emb.expand(len(texts), -1).contiguous(),
+            cond_prompt_speech_tokens=self.conds.t3.cond_prompt_speech_tokens.expand(len(texts), -1).contiguous() if self.conds.t3.cond_prompt_speech_tokens is not None else None,
+            emotion_adv=self.conds.t3.emotion_adv.expand(len(texts), -1, -1).contiguous(),
+        ).to(device=self.device)
+
+        results = []
+
+        # Process each text individually for T3 inference (due to generation loop constraints)
+        # but batch the S3Gen inference where possible
+        all_speech_tokens = []
+
+        with torch.inference_mode():
+            for i, text_tokens in enumerate(padded_tokens):
+                # Individual T3 inference per text (generation is inherently sequential)
+                individual_conds = T3Cond(
+                    speaker_emb=batch_conds.speaker_emb[i:i+1],
+                    cond_prompt_speech_tokens=batch_conds.cond_prompt_speech_tokens[i:i+1] if batch_conds.cond_prompt_speech_tokens is not None else None,
+                    emotion_adv=batch_conds.emotion_adv[i:i+1],
+                ).to(device=self.device)
+
+                speech_tokens = self.t3.inference(
+                    t3_cond=individual_conds,
+                    text_tokens=text_tokens,
+                    max_new_tokens=1000,  # TODO: use the value in config
+                    temperature=temperature,
+                    cfg_weight=cfg_weight,
+                    repetition_penalty=repetition_penalty,
+                    min_p=min_p,
+                    top_p=top_p,
+                )
+                # Extract only the conditional batch.
+                speech_tokens = speech_tokens[0]
+                speech_tokens = drop_invalid_tokens(speech_tokens)
+                speech_tokens = speech_tokens[speech_tokens < 6561]
+                all_speech_tokens.append(speech_tokens.to(self.device))
+
+            # Process S3Gen inference for each (due to current batch_size=1 constraint)
+            for speech_tokens in all_speech_tokens:
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=speech_tokens,
+                    ref_dict=self.conds.gen,
+                )
+                wav = wav.squeeze(0).detach().cpu().numpy()
+                watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+                results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
+
+        return results
