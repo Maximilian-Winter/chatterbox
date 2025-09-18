@@ -34,8 +34,18 @@ from .configs import CFM_PARAMS
 
 
 def drop_invalid_tokens(x):
-    assert len(x.shape) <= 2 and x.shape[0] == 1, "only batch size of one allowed for now"
-    return x[x < SPEECH_VOCAB_SIZE]
+    """Remove invalid tokens from speech token sequences, supporting batch processing."""
+    if len(x.shape) == 1:
+        x = x.unsqueeze(0)  # Add batch dimension if missing
+    elif len(x.shape) > 2:
+        raise ValueError(f"Expected 1D or 2D tensor, got {len(x.shape)}D")
+
+    # Process each batch item individually
+    batch_results = []
+    for i in range(x.shape[0]):
+        valid_tokens = x[i][x[i] < SPEECH_VOCAB_SIZE]
+        batch_results.append(valid_tokens)
+    return batch_results if x.shape[0] > 1 else batch_results[0]  # Maintain backward compatibility
 
 
 # TODO: global resampler cache
@@ -156,6 +166,69 @@ class S3Token2Mel(torch.nn.Module):
             embedding=ref_x_vector,
         )
 
+    def _embed_ref_batch(self, ref_wav: torch.Tensor, ref_sr: int, batch_size: int):
+        """Handle reference embedding for batch processing."""
+        device = self.device
+
+        if ref_wav.shape[0] == 1 and batch_size > 1:
+            # Broadcast single reference to all batch items
+            ref_wav = ref_wav.expand(batch_size, -1)
+        elif ref_wav.shape[0] != batch_size:
+            raise ValueError(f"Reference batch size {ref_wav.shape[0]} doesn't match speech batch size {batch_size}")
+
+        # Process each reference in the batch
+        batch_ref_dicts = []
+        for i in range(batch_size):
+            ref_dict_i = self.embed_ref(ref_wav[i:i+1], ref_sr, device)
+            batch_ref_dicts.append(ref_dict_i)
+
+        # Combine into batch tensors
+        return self._combine_ref_dicts(batch_ref_dicts)
+
+    def _combine_ref_dicts(self, ref_dicts_list):
+        """Combine list of reference dictionaries into batched tensors."""
+        if not ref_dicts_list:
+            return {}
+
+        combined = {}
+        for key in ref_dicts_list[0].keys():
+            if key.endswith('_len'):
+                # Combine length arrays
+                combined[key] = torch.cat([rd[key] for rd in ref_dicts_list], dim=0)
+            else:
+                # Combine tensor data
+                tensors = [rd[key] for rd in ref_dicts_list]
+                if all(t is not None for t in tensors):
+                    combined[key] = torch.cat(tensors, dim=0)
+                else:
+                    combined[key] = None
+
+        return combined
+
+    def _broadcast_ref_dict_to_batch(self, ref_dict, batch_size):
+        """Broadcast reference dictionary to match batch size."""
+        if not ref_dict:
+            return ref_dict
+
+        broadcasted = {}
+        for key, value in ref_dict.items():
+            if value is None:
+                broadcasted[key] = None
+            elif key.endswith('_len'):
+                # Broadcast length arrays
+                if isinstance(value, torch.Tensor) and value.numel() == 1:
+                    broadcasted[key] = value.expand(batch_size)
+                else:
+                    broadcasted[key] = value
+            else:
+                # Broadcast tensor data
+                if isinstance(value, torch.Tensor) and value.shape[0] == 1 and batch_size > 1:
+                    broadcasted[key] = value.expand(batch_size, *value.shape[1:])
+                else:
+                    broadcasted[key] = value
+
+        return broadcasted
+
     def forward(
         self,
         speech_tokens: torch.LongTensor,
@@ -173,19 +246,19 @@ class S3Token2Mel(torch.nn.Module):
         - The speaker encoder accepts 16 kHz waveform.
         - S3TokenizerV2 accepts 16 kHz waveform.
         - The mel-spectrogram for the reference assumes 24 kHz input signal.
-        - This function is designed for batch_size=1 only.
+        - This function now supports batch processing for improved performance.
 
         Args
         ----
-        - `speech_tokens`: S3 speech tokens [B=1, T]
-        - `ref_wav`: reference waveform (`torch.Tensor` with shape=[B=1, T])
+        - `speech_tokens`: S3 speech tokens [B, T] (batch size can be > 1)
+        - `ref_wav`: reference waveform (`torch.Tensor` with shape=[B, T] or [1, T] for broadcasting)
         - `ref_sr`: reference sample rate
         - `finalize`: whether streaming is finished or not. Note that if False, the last 3 tokens will be ignored.
         """
         assert (ref_wav is None) ^ (ref_dict is None), f"Must provide exactly one of ref_wav or ref_dict (got {ref_wav} and {ref_dict})"
 
         if ref_dict is None:
-            ref_dict = self.embed_ref(ref_wav, ref_sr)
+            ref_dict = self._embed_ref_batch(ref_wav, ref_sr, speech_tokens.shape[0])
         else:
             # type/device casting (all values will be numpy if it's from a prod API call)
             for rk in list(ref_dict):
@@ -194,11 +267,15 @@ class S3Token2Mel(torch.nn.Module):
                 if torch.is_tensor(ref_dict[rk]):
                     ref_dict[rk] = ref_dict[rk].to(self.device)
 
+            # Ensure ref_dict tensors match batch size
+            ref_dict = self._broadcast_ref_dict_to_batch(ref_dict, speech_tokens.shape[0])
+
         if len(speech_tokens.shape) == 1:
             speech_tokens = speech_tokens.unsqueeze(0)
 
-        # assert speech_tokens.shape[0] == 1, "only batch size of one allowed for now"
-        speech_token_lens = torch.LongTensor([speech_tokens.size(1)]).to(self.device)
+        # Support batch processing
+        batch_size = speech_tokens.shape[0]
+        speech_token_lens = torch.LongTensor([speech_tokens.size(1)] * batch_size).to(self.device)
 
         output_mels, _ = self.flow.inference(
             token=speech_tokens,

@@ -20,8 +20,8 @@ class SequenceState:
 
 class BatchKVCache:
     """
-    Efficient KV-cache management for batch generation.
-    Handles variable-length sequences and dynamic completion.
+    Optimized KV-cache management for true parallel batch generation.
+    Handles variable-length sequences, dynamic completion, and unified batched operations.
     """
 
     def __init__(self, batch_size: int, num_layers: int, num_heads: int,
@@ -34,118 +34,156 @@ class BatchKVCache:
         self.device = device
         self.dtype = dtype
 
-        # Initialize cache storage - tuple of (key, value) for each layer
-        self.cache = {}
+        # Unified cache storage for parallel operations
+        self.keys_cache = {}  # layer_idx -> (batch_size, num_heads, max_seq_len, head_dim)
+        self.values_cache = {}  # layer_idx -> (batch_size, num_heads, max_seq_len, head_dim)
         self.current_lengths = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self.attention_masks = torch.zeros(batch_size, max_seq_len, dtype=torch.bool, device=device)
+
+        # Track active sequences for dynamic batch management
+        self.active_mask = torch.ones(batch_size, dtype=torch.bool, device=device)
+        self.active_indices = torch.arange(batch_size, device=device)
+
+        # Performance optimization flags
+        self.is_initialized = False
 
     def initialize_cache(self):
-        """Initialize empty KV cache for all layers."""
+        """Initialize unified KV cache for all layers with optimal memory layout."""
+        if self.is_initialized:
+            return
+
         for layer_idx in range(self.num_layers):
-            # Each cache entry is (keys, values) where:
-            # keys/values shape: (batch_size, num_heads, max_seq_len, head_dim)
-            keys = torch.zeros(
+            # Unified cache tensors for parallel operations
+            self.keys_cache[layer_idx] = torch.zeros(
                 self.batch_size, self.num_heads, self.max_seq_len, self.head_dim,
-                device=self.device, dtype=self.dtype
+                device=self.device, dtype=self.dtype, requires_grad=False
             )
-            values = torch.zeros(
+            self.values_cache[layer_idx] = torch.zeros(
                 self.batch_size, self.num_heads, self.max_seq_len, self.head_dim,
-                device=self.device, dtype=self.dtype
+                device=self.device, dtype=self.dtype, requires_grad=False
             )
-            self.cache[layer_idx] = (keys, values)
 
-    def get_cache_for_layer(self, layer_idx: int, active_batch_indices: Optional[List[int]] = None):
+        self.is_initialized = True
+
+    def get_unified_past_key_values(self) -> List[tuple]:
         """
-        Retrieve KV cache for specific layer and batch elements.
-
-        Args:
-            layer_idx: Transformer layer index
-            active_batch_indices: Indices of sequences still generating (None = all)
+        Get past key values in HuggingFace format for unified batch processing.
+        Only returns data for currently active sequences.
 
         Returns:
-            Tuple of (keys, values) tensors
+            List of (keys, values) tuples for each layer, filtered to active sequences
         """
-        if layer_idx not in self.cache:
+        if not self.is_initialized:
             return None
 
-        keys, values = self.cache[layer_idx]
-
-        if active_batch_indices is None:
-            return (keys, values)
-
-        # Return only active sequences
-        active_keys = keys[active_batch_indices]
-        active_values = values[active_batch_indices]
-        return (active_keys, active_values)
-
-    def update_cache(self, layer_idx: int, new_keys: torch.Tensor, new_values: torch.Tensor,
-                     active_batch_indices: Optional[List[int]] = None):
-        """
-        Update KV cache with new key-value pairs.
-
-        Args:
-            layer_idx: Transformer layer index
-            new_keys: New keys tensor (batch_size, num_heads, seq_len, head_dim)
-            new_values: New values tensor (batch_size, num_heads, seq_len, head_dim)
-            active_batch_indices: Indices of sequences being updated
-        """
-        if layer_idx not in self.cache:
-            self.initialize_cache()
-
-        keys, values = self.cache[layer_idx]
-
-        if active_batch_indices is None:
-            active_batch_indices = list(range(self.batch_size))
-
-        # Update cache for active sequences
-        for i, batch_idx in enumerate(active_batch_indices):
-            current_len = self.current_lengths[batch_idx].item()
-            seq_len = new_keys.size(2)
-
-            # Update cache slices
-            keys[batch_idx, :, current_len:current_len + seq_len] = new_keys[i]
-            values[batch_idx, :, current_len:current_len + seq_len] = new_values[i]
-
-    def increment_lengths(self, active_batch_indices: Optional[List[int]] = None, increment: int = 1):
-        """Increment sequence lengths for active sequences."""
-        if active_batch_indices is None:
-            active_batch_indices = list(range(self.batch_size))
-
-        for batch_idx in active_batch_indices:
-            self.current_lengths[batch_idx] += increment
-
-    def get_past_key_values(self, active_batch_indices: Optional[List[int]] = None):
-        """
-        Get past key values in HuggingFace format.
-
-        Returns:
-            List of tuples (key, value) for each layer
-        """
         past_key_values = []
+        active_batch_size = self.active_mask.sum().item()
+
+        if active_batch_size == 0:
+            return None
+
+        # Get currently active indices
+        active_indices = self.active_indices[self.active_mask]
 
         for layer_idx in range(self.num_layers):
-            keys, values = self.get_cache_for_layer(layer_idx, active_batch_indices)
-            if keys is not None:
-                # Trim to actual sequence lengths
-                if active_batch_indices is None:
-                    max_len = self.current_lengths.max().item()
-                    keys = keys[:, :, :max_len]
-                    values = values[:, :, :max_len]
-                else:
-                    max_len = self.current_lengths[active_batch_indices].max().item()
-                    keys = keys[:, :, :max_len]
-                    values = values[:, :, :max_len]
+            if layer_idx in self.keys_cache:
+                # Extract active sequences and trim to actual lengths
+                keys = self.keys_cache[layer_idx][active_indices]  # (active_batch, heads, seq, dim)
+                values = self.values_cache[layer_idx][active_indices]
+
+                # Trim to maximum current length among active sequences
+                max_len = self.current_lengths[active_indices].max().item()
+                if max_len > 0:
+                    keys = keys[:, :, :max_len, :]
+                    values = values[:, :, :max_len, :]
 
                 past_key_values.append((keys, values))
             else:
-                past_key_values.append(None)
+                past_key_values.append((None, None))
 
         return past_key_values
+
+    def update_unified_cache(self, past_key_values: List[tuple]):
+        """
+        Update cache with new key-value pairs from transformer output.
+        Supports both initial full-sequence caching and incremental updates.
+
+        Args:
+            past_key_values: List of (keys, values) tuples from transformer output
+        """
+        if not self.is_initialized:
+            self.initialize_cache()
+
+        active_indices = self.active_indices[self.active_mask]
+        active_batch_size = active_indices.size(0)
+
+        if active_batch_size == 0:
+            return
+
+        for layer_idx, (new_keys, new_values) in enumerate(past_key_values):
+            if new_keys is None or new_values is None:
+                continue
+
+            # Handle batch size mismatch (e.g., CFG scenarios)
+            if new_keys.size(0) != active_batch_size:
+                # Take every second element for CFG or handle appropriately
+                if new_keys.size(0) == active_batch_size * 2:
+                    new_keys = new_keys[::2]  # Take every second element
+                    new_values = new_values[::2]
+                else:
+                    # Handle other batch size mismatches
+                    min_batch = min(new_keys.size(0), active_batch_size)
+                    new_keys = new_keys[:min_batch]
+                    new_values = new_values[:min_batch]
+                    active_indices = active_indices[:min_batch]
+
+            current_seq_len = new_keys.size(2)
+
+            # Store in unified cache
+            for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
+                current_len = self.current_lengths[batch_idx].item()
+                end_pos = current_len + current_seq_len
+
+                if end_pos <= self.max_seq_len:
+                    self.keys_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_keys[i]
+                    self.values_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_values[i]
+
+    def update_sequence_states(self, completed_indices: torch.Tensor):
+        """
+        Update active sequence tracking when sequences complete.
+
+        Args:
+            completed_indices: Tensor of global batch indices that completed this step
+        """
+        if completed_indices.numel() > 0:
+            # Mark completed sequences as inactive
+            self.active_mask[completed_indices] = False
+
+    def increment_lengths(self, active_indices: Optional[torch.Tensor] = None, increment: int = 1):
+        """Increment sequence lengths for active sequences."""
+        if active_indices is None:
+            active_indices = self.active_indices[self.active_mask]
+
+        self.current_lengths[active_indices] += increment
+
+    def get_active_batch_size(self) -> int:
+        """Get current number of active sequences."""
+        return self.active_mask.sum().item()
+
+    def prepare_for_next_step(self):
+        """Prepare cache state for the next generation step."""
+        # Update attention masks for new tokens
+        active_indices = self.active_indices[self.active_mask]
+        for idx in active_indices:
+            current_len = self.current_lengths[idx].item()
+            if current_len < self.max_seq_len:
+                self.attention_masks[idx, current_len] = True
 
 
 class BatchGenerationState:
     """
-    Manages generation state for multiple sequences in parallel.
-    Tracks completion, progress, and coordinates KV-cache management.
+    Optimized parallel batch generation state manager.
+    Efficiently handles variable-length sequences, dynamic completion, and unified operations.
     """
 
     def __init__(self, batch_size: int, max_tokens: int, device: torch.device,
@@ -156,16 +194,20 @@ class BatchGenerationState:
         self.start_token = start_token
         self.stop_token = stop_token
 
-        # Initialize sequence states (don't include start token in generated_tokens yet)
-        self.sequences = [
-            SequenceState(
-                sequence_id=i,
-                generated_tokens=torch.empty(1, 0, device=device, dtype=torch.long),  # Start empty
-                position=0
-            ) for i in range(batch_size)
-        ]
+        # Unified tensor-based state management for efficiency
+        self.generated_tokens = torch.full(
+            (batch_size, max_tokens), self.stop_token,
+            device=device, dtype=torch.long
+        )
+        self.sequence_lengths = torch.zeros(batch_size, device=device, dtype=torch.long)
+        self.completion_flags = torch.zeros(batch_size, device=device, dtype=torch.bool)
+        self.completion_steps = torch.full((batch_size,), -1, device=device, dtype=torch.long)
 
-        # Initialize KV cache
+        # Active sequence tracking for dynamic batch processing
+        self.active_mask = torch.ones(batch_size, device=device, dtype=torch.bool)
+        self.active_indices = torch.arange(batch_size, device=device)
+
+        # Initialize optimized KV cache
         self.kv_cache = BatchKVCache(
             batch_size=batch_size,
             num_layers=model_config.get('num_hidden_layers', 30),
@@ -178,110 +220,165 @@ class BatchGenerationState:
 
         # Generation tracking
         self.current_step = 0
+
+        # Legacy compatibility
+        self.sequences = [
+            SequenceState(
+                sequence_id=i,
+                generated_tokens=torch.empty(1, 0, device=device, dtype=torch.long),
+                position=0
+            ) for i in range(batch_size)
+        ]
         self.active_sequences = list(range(batch_size))
         self.completed_sequences = []
 
     def get_current_tokens(self) -> torch.Tensor:
-        """Get current tokens for all active sequences."""
-        active_tokens = []
-        for seq_id in self.active_sequences:
-            seq = self.sequences[seq_id]
-            if seq.generated_tokens.size(1) > 0:
-                active_tokens.append(seq.generated_tokens[:, -1:])  # Last token
-            else:
-                # First iteration - use start token
-                active_tokens.append(torch.tensor([[self.start_token]], device=self.device, dtype=torch.long))
+        """Get current tokens for all active sequences using optimized tensor operations."""
+        active_indices = self.active_indices[self.active_mask]
 
-        if not active_tokens:
+        if active_indices.numel() == 0:
             return torch.empty(0, 1, device=self.device, dtype=torch.long)
 
-        return torch.cat(active_tokens, dim=0)
+        # Get last generated token for each active sequence
+        current_tokens = []
+        for idx in active_indices:
+            seq_len = self.sequence_lengths[idx].item()
+            if seq_len > 0:
+                current_tokens.append(self.generated_tokens[idx, seq_len-1:seq_len].unsqueeze(0))
+            else:
+                # First iteration - use start token
+                current_tokens.append(torch.tensor([[self.start_token]], device=self.device, dtype=torch.long))
 
-    def get_all_generated_tokens(self) -> torch.Tensor:
-        """Get all generated tokens for active sequences."""
-        active_tokens = []
-        max_len = max(seq.generated_tokens.size(1) for seq in self.sequences if not seq.is_completed)
+        return torch.cat(current_tokens, dim=0)
 
-        for seq_id in self.active_sequences:
-            seq = self.sequences[seq_id]
-            tokens = seq.generated_tokens
+    def get_unified_active_tokens(self) -> torch.Tensor:
+        """
+        Get all generated tokens for active sequences in unified tensor format.
+        Optimized for parallel processing.
+        """
+        active_indices = self.active_indices[self.active_mask]
+        active_batch_size = active_indices.numel()
 
-            # Pad to max length if needed
-            if tokens.size(1) < max_len:
-                pad_size = max_len - tokens.size(1)
-                tokens = torch.cat([
-                    tokens,
-                    torch.full((1, pad_size), self.stop_token, device=self.device, dtype=torch.long)
-                ], dim=1)
-
-            active_tokens.append(tokens)
-
-        if not active_tokens:
+        if active_batch_size == 0:
             return torch.empty(0, 0, device=self.device, dtype=torch.long)
 
-        return torch.cat(active_tokens, dim=0)
+        # Get maximum sequence length among active sequences
+        active_lengths = self.sequence_lengths[active_indices]
+        max_len = active_lengths.max().item()
+
+        if max_len == 0:
+            return torch.empty(active_batch_size, 0, device=self.device, dtype=torch.long)
+
+        # Extract active sequences and pad to max length
+        active_tokens = torch.full(
+            (active_batch_size, max_len), self.stop_token,
+            device=self.device, dtype=torch.long
+        )
+
+        for i, idx in enumerate(active_indices):
+            seq_len = active_lengths[i].item()
+            if seq_len > 0:
+                active_tokens[i, :seq_len] = self.generated_tokens[idx, :seq_len]
+
+        return active_tokens
+
+    def get_all_generated_tokens(self) -> torch.Tensor:
+        """Get all generated tokens for active sequences - legacy compatibility method."""
+        return self.get_unified_active_tokens()
 
     def update_with_new_tokens(self, new_tokens: torch.Tensor):
         """
-        Update state with newly generated tokens.
+        Optimized batch update with newly generated tokens using vectorized operations.
 
         Args:
             new_tokens: Tensor of shape (active_batch_size, 1) with new tokens
         """
-        if new_tokens.size(0) != len(self.active_sequences):
-            raise ValueError(f"Expected {len(self.active_sequences)} tokens, got {new_tokens.size(0)}")
+        active_indices = self.active_indices[self.active_mask]
+        active_batch_size = active_indices.numel()
 
-        # Update each active sequence
-        for i, seq_id in enumerate(self.active_sequences):
-            seq = self.sequences[seq_id]
+        if new_tokens.size(0) != active_batch_size:
+            raise ValueError(f"Expected {active_batch_size} tokens, got {new_tokens.size(0)}")
+
+        if active_batch_size == 0:
+            return
+
+        # Vectorized token updates
+        current_lengths = self.sequence_lengths[active_indices]
+        new_token_values = new_tokens.squeeze(1)  # (active_batch_size,)
+
+        # Store new tokens at current positions
+        for i, idx in enumerate(active_indices):
+            pos = current_lengths[i].item()
+            if pos < self.max_tokens:
+                self.generated_tokens[idx, pos] = new_token_values[i]
+
+        # Update sequence lengths
+        self.sequence_lengths[active_indices] += 1
+
+        # Check for completion using vectorized operations
+        stop_condition = (new_token_values == self.stop_token)
+        length_condition = (self.sequence_lengths[active_indices] >= self.max_tokens)
+        completion_mask = stop_condition | length_condition
+
+        # Mark completed sequences
+        completed_indices = active_indices[completion_mask]
+        if completed_indices.numel() > 0:
+            self.completion_flags[completed_indices] = True
+            self.completion_steps[completed_indices] = self.current_step
+            self.active_mask[completed_indices] = False
+
+            # Update KV cache state
+            self.kv_cache.update_sequence_states(completed_indices)
+
+            # Update legacy compatibility structures
+            for idx in completed_indices:
+                idx_item = idx.item()
+                if idx_item in self.active_sequences:
+                    self.active_sequences.remove(idx_item)
+                    self.completed_sequences.append(idx_item)
+                    self.sequences[idx_item].is_completed = True
+                    self.sequences[idx_item].completion_step = self.current_step
+
+        # Update cache lengths for remaining active sequences
+        remaining_active = self.active_indices[self.active_mask]
+        self.kv_cache.increment_lengths(remaining_active)
+
+        # Update legacy sequence states for compatibility
+        for i, idx in enumerate(active_indices):
+            seq = self.sequences[idx.item()]
             new_token = new_tokens[i:i+1]
-
-            # Append new token
             seq.generated_tokens = torch.cat([seq.generated_tokens, new_token], dim=1)
             seq.position += 1
 
-            # Check for completion
-            if (new_token.item() == self.stop_token or
-                seq.generated_tokens.size(1) >= self.max_tokens):
-                seq.is_completed = True
-                seq.completion_step = self.current_step
-
-        # Update active sequences list
-        newly_completed = [seq_id for seq_id in self.active_sequences
-                          if self.sequences[seq_id].is_completed]
-
-        for seq_id in newly_completed:
-            self.active_sequences.remove(seq_id)
-            self.completed_sequences.append(seq_id)
-
-        # Update cache lengths for active sequences
-        self.kv_cache.increment_lengths(self.active_sequences)
         self.current_step += 1
+        self.kv_cache.prepare_for_next_step()
 
     def all_completed(self) -> bool:
-        """Check if all sequences have completed generation."""
-        return len(self.active_sequences) == 0
+        """Check if all sequences have completed generation using optimized tensor operations."""
+        return not self.active_mask.any().item()
 
     def has_active_sequences(self) -> bool:
-        """Check if there are still sequences generating."""
-        return len(self.active_sequences) > 0
+        """Check if there are still sequences generating using optimized tensor operations."""
+        return self.active_mask.any().item()
 
     def get_active_batch_size(self) -> int:
-        """Get current number of active sequences."""
-        return len(self.active_sequences)
+        """Get current number of active sequences using optimized tensor operations."""
+        return self.active_mask.sum().item()
 
     def get_results(self) -> List[torch.Tensor]:
         """
         Get final generated token sequences for all original sequences.
+        Uses optimized tensor operations for better performance.
 
         Returns:
             List of tensors, one per original sequence
         """
         results = []
-        for seq in self.sequences:
-            # Return generated sequence as-is (no start token to skip)
-            if seq.generated_tokens.size(1) > 0:
-                result = seq.generated_tokens
+        for i in range(self.batch_size):
+            seq_len = self.sequence_lengths[i].item()
+            if seq_len > 0:
+                # Extract actual sequence without padding
+                result = self.generated_tokens[i, :seq_len].unsqueeze(0)
             else:
                 result = torch.empty(1, 0, device=self.device, dtype=torch.long)
             results.append(result)
@@ -289,12 +386,51 @@ class BatchGenerationState:
         return results
 
     def get_generation_info(self) -> Dict[str, Any]:
-        """Get generation statistics and info."""
+        """Get generation statistics and info using optimized tensor operations."""
         return {
             'total_sequences': self.batch_size,
-            'completed_sequences': len(self.completed_sequences),
-            'active_sequences': len(self.active_sequences),
+            'completed_sequences': self.completion_flags.sum().item(),
+            'active_sequences': self.active_mask.sum().item(),
             'current_step': self.current_step,
-            'completion_steps': [self.sequences[i].completion_step for i in range(self.batch_size)],
-            'sequence_lengths': [seq.generated_tokens.size(1) for seq in self.sequences]
+            'completion_steps': self.completion_steps.tolist(),
+            'sequence_lengths': self.sequence_lengths.tolist(),
+            'average_length': self.sequence_lengths.float().mean().item(),
+            'max_length': self.sequence_lengths.max().item(),
+            'min_length': self.sequence_lengths.min().item(),
         }
+
+    def get_attention_mask(self) -> torch.Tensor:
+        """
+        Generate attention mask for current batch state.
+        Returns tensor of shape (active_batch_size, max_seq_len) for efficient attention computation.
+        """
+        active_indices = self.active_indices[self.active_mask]
+        active_batch_size = active_indices.numel()
+
+        if active_batch_size == 0:
+            return torch.empty(0, 0, device=self.device, dtype=torch.bool)
+
+        active_lengths = self.sequence_lengths[active_indices]
+        max_len = active_lengths.max().item()
+
+        if max_len == 0:
+            return torch.empty(active_batch_size, 0, device=self.device, dtype=torch.bool)
+
+        # Create attention mask: True for valid positions
+        attention_mask = torch.arange(max_len, device=self.device).unsqueeze(0) < active_lengths.unsqueeze(1)
+        return attention_mask
+
+    def optimize_for_parallel_processing(self):
+        """
+        Optimize internal state for maximum parallel processing efficiency.
+        Call this before starting generation loop.
+        """
+        # Pre-allocate commonly used tensors
+        self._temp_active_indices = torch.empty(self.batch_size, device=self.device, dtype=torch.long)
+        self._temp_active_lengths = torch.empty(self.batch_size, device=self.device, dtype=torch.long)
+
+        # Ensure KV cache is properly initialized
+        self.kv_cache.initialize_cache()
+
+        # Pre-compute static masks for better memory access patterns
+        self.kv_cache.prepare_for_next_step()

@@ -29,7 +29,9 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
         self.model = llama
         self.speech_enc = speech_enc
         self.speech_head = speech_head
-        self._added_cond = False
+        # Replace global flag with per-sequence state tracking for batch processing
+        self._sequence_cond_states = {}  # sequence_id -> bool
+        self._current_batch_size = 0
         self.alignment_stream_analyzer = alignment_stream_analyzer
 
     @torch.inference_mode()
@@ -55,13 +57,36 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
         # custom speech token embedding layer
         inputs_embeds = self.speech_enc(input_ids)
 
-        # prefix decoder conditioning if applicable
-        if not self._added_cond:
-            assert past_key_values is not None # should be first step
+        # Batch-aware conditioning management
+        batch_size = inputs_embeds.size(0)
+        if batch_size != self._current_batch_size:
+            # Reset state tracking for new batch
+            self._sequence_cond_states = {i: False for i in range(batch_size)}
+            self._current_batch_size = batch_size
+
+        # Check per-sequence conditioning state
+        batch_needs_cond = []
+        for seq_idx in range(batch_size):
+            needs_cond = not self._sequence_cond_states.get(seq_idx, False)
+            batch_needs_cond.append(needs_cond)
+
+        # Apply conditioning per sequence as needed
+        if any(batch_needs_cond):
+            assert past_key_values is not None # should be first step for sequences needing conditioning
             if decoder_cond.size(0) != inputs_embeds.size(0):
                 decoder_cond = decoder_cond.expand(inputs_embeds.size(0), -1, -1)
-            inputs_embeds = torch.cat([decoder_cond, inputs_embeds], dim=1)
-            self._added_cond = True
+
+            # Concatenate conditioning for sequences that need it
+            processed_embeds = []
+            for seq_idx in range(batch_size):
+                if batch_needs_cond[seq_idx]:
+                    seq_embeds = torch.cat([decoder_cond[seq_idx:seq_idx+1], inputs_embeds[seq_idx:seq_idx+1]], dim=1)
+                    self._sequence_cond_states[seq_idx] = True
+                else:
+                    seq_embeds = inputs_embeds[seq_idx:seq_idx+1]
+                processed_embeds.append(seq_embeds)
+
+            inputs_embeds = torch.cat(processed_embeds, dim=0)
 
         return {
             "inputs_embeds": inputs_embeds,
@@ -114,3 +139,13 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
             hidden_states=tfmr_out.hidden_states,
             attentions=tfmr_out.attentions,
         )
+
+    def reset_batch_state(self):
+        """Reset per-sequence conditioning states for new batch processing."""
+        self._sequence_cond_states = {}
+        self._current_batch_size = 0
+
+    def set_batch_size(self, batch_size: int):
+        """Initialize state tracking for a specific batch size."""
+        self._sequence_cond_states = {i: False for i in range(batch_size)}
+        self._current_batch_size = batch_size

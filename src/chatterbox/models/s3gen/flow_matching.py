@@ -91,29 +91,41 @@ class ConditionalCFM(BASECFM):
         # Or in future might add like a return_all_steps flag
         sol = []
 
-        # Do not use concat, it may cause memory format changed and trt infer with wrong results!
-        x_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        mask_in = torch.zeros([2, 1, x.size(2)], device=x.device, dtype=x.dtype)
-        mu_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
-        t_in = torch.zeros([2], device=x.device, dtype=x.dtype)
-        spks_in = torch.zeros([2, 80], device=x.device, dtype=x.dtype)
-        cond_in = torch.zeros([2, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        # Support batch CFG processing - scale tensors to actual batch size
+        batch_size = x.size(0)
+        cfg_batch_size = 2 * batch_size  # CFG requires double batch size
+
+        x_in = torch.zeros([cfg_batch_size, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        mask_in = torch.zeros([cfg_batch_size, 1, x.size(2)], device=x.device, dtype=x.dtype)
+        mu_in = torch.zeros([cfg_batch_size, 80, x.size(2)], device=x.device, dtype=x.dtype)
+        t_in = torch.zeros([cfg_batch_size], device=x.device, dtype=x.dtype)
+        spks_in = torch.zeros([cfg_batch_size, 80], device=x.device, dtype=x.dtype)
+        cond_in = torch.zeros([cfg_batch_size, 80, x.size(2)], device=x.device, dtype=x.dtype)
         for step in range(1, len(t_span)):
-            # Classifier-Free Guidance inference introduced in VoiceBox
-            x_in[:] = x
-            mask_in[:] = mask
-            mu_in[0] = mu
-            t_in[:] = t.unsqueeze(0)
-            spks_in[0] = spks
-            cond_in[0] = cond
+            # Batch Classifier-Free Guidance inference
+            # Conditional branch: first half of batch
+            x_in[:batch_size] = x
+            mask_in[:batch_size] = mask
+            mu_in[:batch_size] = mu
+            t_in[:batch_size] = t.expand(batch_size)
+            spks_in[:batch_size] = spks
+            cond_in[:batch_size] = cond
+
+            # Unconditional branch: second half of batch (zeros for unconditional)
+            x_in[batch_size:] = x
+            mask_in[batch_size:] = mask
+            # mu_in[batch_size:] remains zeros for unconditional
+            t_in[batch_size:] = t.expand(batch_size)
+            # spks_in[batch_size:] remains zeros for unconditional
+            # cond_in[batch_size:] remains zeros for unconditional
             dphi_dt = self.forward_estimator(
                 x_in, mask_in,
                 mu_in, t_in,
                 spks_in,
                 cond_in
             )
-            dphi_dt, cfg_dphi_dt = torch.split(dphi_dt, [x.size(0), x.size(0)], dim=0)
-            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt - self.inference_cfg_rate * cfg_dphi_dt)
+            dphi_dt_cond, dphi_dt_uncond = torch.split(dphi_dt, [batch_size, batch_size], dim=0)
+            dphi_dt = ((1.0 + self.inference_cfg_rate) * dphi_dt_cond - self.inference_cfg_rate * dphi_dt_uncond)
             x = x + dt * dphi_dt
             t = t + dt
             sol.append(x)
@@ -188,7 +200,8 @@ class ConditionalCFM(BASECFM):
 class CausalConditionalCFM(ConditionalCFM):
     def __init__(self, in_channels=240, cfm_params=CFM_PARAMS, n_spks=1, spk_emb_dim=80, estimator=None):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
-        self.rand_noise = torch.randn([1, 80, 50 * 300])
+        # Remove hardcoded noise tensor to enable dynamic batch processing
+        # self.rand_noise = torch.randn([1, 80, 50 * 300])
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
