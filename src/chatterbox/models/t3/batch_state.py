@@ -6,6 +6,7 @@ Handles tracking of generation progress, completion flags, and KV-cache for mult
 import torch
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
+from transformers.cache_utils import DynamicCache
 
 
 @dataclass
@@ -65,25 +66,26 @@ class BatchKVCache:
 
         self.is_initialized = True
 
-    def get_unified_past_key_values(self) -> List[tuple]:
+    def get_unified_past_key_values(self) -> Optional[DynamicCache]:
         """
-        Get past key values in HuggingFace format for unified batch processing.
+        Get past key values in HuggingFace DynamicCache format for unified batch processing.
         Only returns data for currently active sequences.
 
         Returns:
-            List of (keys, values) tuples for each layer, filtered to active sequences
+            DynamicCache object containing keys and values for each layer, filtered to active sequences
         """
         if not self.is_initialized:
             return None
 
-        past_key_values = []
         active_batch_size = self.active_mask.sum().item()
-
         if active_batch_size == 0:
             return None
 
         # Get currently active indices
         active_indices = self.active_indices[self.active_mask]
+
+        # Create DynamicCache instance
+        cache = DynamicCache()
 
         for layer_idx in range(self.num_layers):
             if layer_idx in self.keys_cache:
@@ -97,19 +99,32 @@ class BatchKVCache:
                     keys = keys[:, :, :max_len, :]
                     values = values[:, :, :max_len, :]
 
-                past_key_values.append((keys, values))
+                    # Update cache with properly shaped tensors
+                    cache.update(keys, values, layer_idx)
+                else:
+                    # For empty sequences, add empty tensors with correct shape
+                    empty_keys = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
+                                           device=self.device, dtype=self.dtype)
+                    empty_values = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
+                                             device=self.device, dtype=self.dtype)
+                    cache.update(empty_keys, empty_values, layer_idx)
             else:
-                past_key_values.append((None, None))
+                # Add empty tensors for missing layers
+                empty_keys = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
+                                       device=self.device, dtype=self.dtype)
+                empty_values = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
+                                         device=self.device, dtype=self.dtype)
+                cache.update(empty_keys, empty_values, layer_idx)
 
-        return past_key_values
+        return cache
 
-    def update_unified_cache(self, past_key_values: List[tuple]):
+    def update_unified_cache(self, past_key_values):
         """
         Update cache with new key-value pairs from transformer output.
-        Supports both initial full-sequence caching and incremental updates.
+        Supports both DynamicCache objects and legacy tuple format.
 
         Args:
-            past_key_values: List of (keys, values) tuples from transformer output
+            past_key_values: Either DynamicCache object or List of (keys, values) tuples from transformer output
         """
         if not self.is_initialized:
             self.initialize_cache()
@@ -120,33 +135,51 @@ class BatchKVCache:
         if active_batch_size == 0:
             return
 
-        for layer_idx, (new_keys, new_values) in enumerate(past_key_values):
-            if new_keys is None or new_values is None:
-                continue
+        # Handle DynamicCache format
+        if isinstance(past_key_values, DynamicCache):
+            # Extract key-value pairs from DynamicCache
+            for layer_idx in range(len(past_key_values.key_cache)):
+                new_keys = past_key_values.key_cache[layer_idx]
+                new_values = past_key_values.value_cache[layer_idx]
+                self._update_layer_cache(layer_idx, new_keys, new_values, active_indices, active_batch_size)
 
-            # Handle batch size mismatch (e.g., CFG scenarios)
-            if new_keys.size(0) != active_batch_size:
-                # Take every second element for CFG or handle appropriately
-                if new_keys.size(0) == active_batch_size * 2:
-                    new_keys = new_keys[::2]  # Take every second element
-                    new_values = new_values[::2]
-                else:
-                    # Handle other batch size mismatches
-                    min_batch = min(new_keys.size(0), active_batch_size)
-                    new_keys = new_keys[:min_batch]
-                    new_values = new_values[:min_batch]
-                    active_indices = active_indices[:min_batch]
+        # Handle legacy tuple format
+        elif isinstance(past_key_values, (list, tuple)):
+            for layer_idx, (new_keys, new_values) in enumerate(past_key_values):
+                if new_keys is not None and new_values is not None:
+                    self._update_layer_cache(layer_idx, new_keys, new_values, active_indices, active_batch_size)
 
-            current_seq_len = new_keys.size(2)
+    def _update_layer_cache(self, layer_idx: int, new_keys: torch.Tensor, new_values: torch.Tensor,
+                          active_indices: torch.Tensor, active_batch_size: int):
+        """
+        Update cache for a specific layer with proper batch size handling.
+        """
+        if new_keys is None or new_values is None:
+            return
 
-            # Store in unified cache
-            for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
-                current_len = self.current_lengths[batch_idx].item()
-                end_pos = current_len + current_seq_len
+        # Handle batch size mismatch (e.g., CFG scenarios)
+        if new_keys.size(0) != active_batch_size:
+            # Take every second element for CFG or handle appropriately
+            if new_keys.size(0) == active_batch_size * 2:
+                new_keys = new_keys[::2]  # Take every second element
+                new_values = new_values[::2]
+            else:
+                # Handle other batch size mismatches
+                min_batch = min(new_keys.size(0), active_batch_size)
+                new_keys = new_keys[:min_batch]
+                new_values = new_values[:min_batch]
+                active_indices = active_indices[:min_batch]
 
-                if end_pos <= self.max_seq_len:
-                    self.keys_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_keys[i]
-                    self.values_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_values[i]
+        current_seq_len = new_keys.size(2)
+
+        # Store in unified cache
+        for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
+            current_len = self.current_lengths[batch_idx].item()
+            end_pos = current_len + current_seq_len
+
+            if end_pos <= self.max_seq_len:
+                self.keys_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_keys[i]
+                self.values_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_values[i]
 
     def update_sequence_states(self, completed_indices: torch.Tensor):
         """
@@ -364,6 +397,74 @@ class BatchGenerationState:
     def get_active_batch_size(self) -> int:
         """Get current number of active sequences using optimized tensor operations."""
         return self.active_mask.sum().item()
+
+    def get_completion_status(self) -> Dict[str, Any]:
+        """
+        Get detailed completion status for debugging EOS detection.
+
+        Returns:
+            Dictionary with completion status details for each sequence
+        """
+        completion_status = {
+            'total_sequences': self.batch_size,
+            'completed_count': self.completion_flags.sum().item(),
+            'active_count': self.active_mask.sum().item(),
+            'completion_flags': self.completion_flags.tolist(),
+            'sequence_lengths': self.sequence_lengths.tolist(),
+            'completion_steps': self.completion_steps.tolist(),
+            'current_step': self.current_step,
+            'stop_token': self.stop_token,
+        }
+
+        # Add per-sequence details
+        sequence_details = []
+        for i in range(self.batch_size):
+            seq_detail = {
+                'seq_id': i,
+                'is_completed': self.completion_flags[i].item(),
+                'is_active': self.active_mask[i].item(),
+                'length': self.sequence_lengths[i].item(),
+                'completion_step': self.completion_steps[i].item() if self.completion_steps[i].item() >= 0 else None,
+                'last_token': self.generated_tokens[i, self.sequence_lengths[i].item()-1].item() if self.sequence_lengths[i].item() > 0 else None,
+            }
+            sequence_details.append(seq_detail)
+
+        completion_status['sequence_details'] = sequence_details
+        return completion_status
+
+    def validate_eos_detection(self) -> bool:
+        """
+        Validate that EOS detection is working correctly.
+        Check for sequences that should have stopped but didn't.
+
+        Returns:
+            True if EOS detection is working correctly, False otherwise
+        """
+        issues_found = []
+
+        for i in range(self.batch_size):
+            seq_len = self.sequence_lengths[i].item()
+            if seq_len > 0:
+                # Check if sequence contains stop token but is still active
+                sequence_tokens = self.generated_tokens[i, :seq_len]
+                has_stop_token = (sequence_tokens == self.stop_token).any().item()
+                is_active = self.active_mask[i].item()
+
+                if has_stop_token and is_active:
+                    issues_found.append(f"Sequence {i} contains stop token but is still active")
+
+                # Check if sequence is at max length but still active
+                if seq_len >= self.max_tokens and is_active:
+                    issues_found.append(f"Sequence {i} at max length {seq_len} but still active")
+
+        if issues_found:
+            import logging
+            logger = logging.getLogger(__name__)
+            for issue in issues_found:
+                logger.warning(f"⚠️ EOS Detection Issue: {issue}")
+            return False
+
+        return True
 
     def get_results(self) -> List[torch.Tensor]:
         """

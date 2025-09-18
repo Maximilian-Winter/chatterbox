@@ -72,7 +72,8 @@ class T3HuggingfaceBackend(LlamaPreTrainedModel, GenerationMixin):
 
         # Apply conditioning per sequence as needed
         if any(batch_needs_cond):
-            assert past_key_values is not None # should be first step for sequences needing conditioning
+            # For initial conditioning step, past_key_values can be None
+            # This is expected for the first forward pass with conditioning
             if decoder_cond.size(0) != inputs_embeds.size(0):
                 decoder_cond = decoder_cond.expand(inputs_embeds.size(0), -1, -1)
 

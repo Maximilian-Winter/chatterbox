@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 from transformers import LlamaModel, LlamaConfig
 from transformers.generation.logits_process import TopPLogitsWarper, RepetitionPenaltyLogitsProcessor, MinPLogitsWarper
+from transformers.cache_utils import DynamicCache
 
 from .modules.learned_pos_emb import LearnedPositionEmbeddings
 
@@ -540,7 +541,9 @@ class T3(nn.Module):
 
         # Generation loop with true parallel processing
         for step in tqdm(range(max_new_tokens), desc="Parallel Batch Sampling", dynamic_ncols=True):
-            if not batch_state.has_active_sequences():
+            # Critical EOS detection fix: Check if all sequences completed early
+            if batch_state.all_completed() or not batch_state.has_active_sequences():
+                logger.info(f"🎯 Early termination at step {step}: All sequences completed naturally")
                 break
 
             active_batch_size = batch_state.get_active_batch_size()
@@ -549,6 +552,7 @@ class T3(nn.Module):
             current_tokens = batch_state.get_current_tokens()  # (active_batch_size, 1)
 
             if current_tokens.size(0) == 0:
+                logger.info(f"🎯 Early termination at step {step}: No more active sequences")
                 break
 
             # Get unified embeddings for all active sequences
@@ -619,12 +623,36 @@ class T3(nn.Module):
             # Update batch state with parallel operations
             batch_state.update_with_new_tokens(next_tokens)
 
+            # Additional early termination check after token update
+            if batch_state.all_completed():
+                logger.info(f"🎯 Early termination at step {step+1}: All sequences completed after token update")
+                break
+
+            # Performance optimization: Check completion every 10 steps for very active batches
+            if step > 0 and step % 10 == 0:
+                remaining_active = batch_state.get_active_batch_size()
+                if remaining_active == 0:
+                    logger.info(f"🎯 Early termination at step {step+1}: No sequences remain active")
+                    break
+                elif remaining_active < active_batch_size * 0.2:  # Less than 20% remain
+                    logger.info(f"🎯 Continuing with {remaining_active}/{batch_size} sequences at step {step+1}")
+                    # Continue processing but note the efficiency gain
+
         # Extract results
         results = batch_state.get_results()
 
-        # Debug: Print generation info
+        # Debug: Print generation info and validate EOS detection
         gen_info = batch_state.get_generation_info()
         logger.info(f"Batch generation info: {gen_info}")
+
+        # Validate EOS detection is working correctly
+        if not batch_state.validate_eos_detection():
+            logger.warning("⚠️ EOS detection issues found - check logs above")
+            # Get detailed completion status for debugging
+            completion_status = batch_state.get_completion_status()
+            logger.info(f"Detailed completion status: {completion_status}")
+        else:
+            logger.info("✅ EOS detection working correctly")
 
         # Return generated speech tokens
         final_results = []
@@ -796,7 +824,9 @@ class T3(nn.Module):
         # Core parallel generation loop
         with torch.amp.autocast('cuda', enabled=memory_efficient_attention):
             for step in tqdm(range(max_new_tokens), desc="Optimized Parallel Generation", dynamic_ncols=True):
-                if not batch_state.has_active_sequences():
+                # Critical EOS detection fix: Check if all sequences completed early
+                if batch_state.all_completed() or not batch_state.has_active_sequences():
+                    logger.info(f"🚀 Optimized early termination at step {step}: All sequences completed naturally")
                     break
 
                 # Unified parallel forward pass
@@ -811,13 +841,30 @@ class T3(nn.Module):
                 # Parallel sampling and state update
                 next_tokens = self._parallel_sample_and_update(batch_logits, batch_state)
 
-                # Early termination check for efficiency
-                if step % 10 == 0 and batch_state.get_active_batch_size() < batch_size * 0.3:
-                    # Most sequences completed, continue with remaining
-                    pass
+                # Additional early termination check after token update
+                if batch_state.all_completed():
+                    logger.info(f"🚀 Optimized early termination at step {step+1}: All sequences completed after token update")
+                    break
+
+                # Performance optimization: Check completion regularly
+                if step > 0 and step % 5 == 0:  # Check more frequently in optimized mode
+                    remaining_active = batch_state.get_active_batch_size()
+                    if remaining_active == 0:
+                        logger.info(f"🚀 Optimized early termination at step {step+1}: No sequences remain active")
+                        break
+                    elif remaining_active < batch_size * 0.3:  # Less than 30% remain
+                        logger.info(f"🚀 Optimized processing: {remaining_active}/{batch_size} sequences at step {step+1}")
+                        # Continue but note the efficiency gain
 
         # Extract and return results
         results = batch_state.get_results()
+
+        # Validate EOS detection for optimized method
+        if not batch_state.validate_eos_detection():
+            logger.warning("⚠️ Optimized EOS detection issues found - check logs above")
+        else:
+            logger.info("✅ Optimized EOS detection working correctly")
+
         final_results = []
 
         for i, result in enumerate(results):
@@ -938,10 +985,8 @@ class T3(nn.Module):
         if cfg_weight > 0.0:
             token_embeds = torch.cat([token_embeds, token_embeds], dim=0)
 
-        # Get cached key-values
+        # Get cached key-values in proper DynamicCache format
         past_key_values = batch_state.kv_cache.get_unified_past_key_values()
-        # Temporarily disable cache for testing
-        past_key_values = None
 
         # Forward pass
         output = self.patched_model(
