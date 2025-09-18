@@ -84,6 +84,18 @@ class BatchKVCache:
         # Get currently active indices
         active_indices = self.active_indices[self.active_mask]
 
+        # Check if we actually have any cached data
+        has_cached_data = False
+        for layer_idx in range(self.num_layers):
+            if layer_idx in self.keys_cache:
+                max_len = self.current_lengths[active_indices].max().item()
+                if max_len > 0:
+                    has_cached_data = True
+                    break
+
+        if not has_cached_data:
+            return None
+
         # Create DynamicCache instance
         cache = DynamicCache()
 
@@ -180,6 +192,10 @@ class BatchKVCache:
             if end_pos <= self.max_seq_len:
                 self.keys_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_keys[i]
                 self.values_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_values[i]
+
+        # Update current lengths after storing new data
+        for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
+            self.current_lengths[batch_idx] += current_seq_len
 
     def update_sequence_states(self, completed_indices: torch.Tensor):
         """

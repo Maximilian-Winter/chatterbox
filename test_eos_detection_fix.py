@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def test_eos_detection():
     """Test EOS detection in both batch inference methods."""
-    logger.info("🔬 Testing EOS Detection Fixes")
+    logger.info("Testing EOS Detection Fixes")
     logger.info("=" * 60)
 
     try:
@@ -42,7 +42,7 @@ def test_eos_detection():
         logger.info(f"Testing with {len(test_texts)} sequences")
 
         # Test 1: Traditional batch_inference method
-        logger.info("\n🔍 Test 1: Traditional batch_inference method")
+        logger.info("\nTest 1: Traditional batch_inference method")
         logger.info("-" * 50)
 
         # Prepare input for T3 batch inference
@@ -61,14 +61,14 @@ def test_eos_detection():
             ], dim=1)
             text_tokens.append(tokens)
 
-            # Create T3 conditioning (use default if no specific conditioning)
+            # Create T3 conditioning (prepare conditioning if needed)
             if tts.conds is None:
-                logger.info("No conditioning available, using defaults")
-                # Create minimal conditioning
-                from chatterbox.models.t3.modules.cond_enc import T3Cond
-                t3_cond = T3Cond()
-            else:
-                t3_cond = tts.conds.t3
+                logger.info("Preparing default conditioning...")
+                # Use TTS's prepare method to get proper conditioning
+                tts.prepare_conditionals()
+
+            # Use the prepared conditioning
+            t3_cond = tts.conds.t3
             t3_conds.append(t3_cond)
 
         # Test with reduced max_new_tokens to see early termination
@@ -81,12 +81,12 @@ def test_eos_detection():
         )
         batch_time = time.time() - start_time
 
-        logger.info(f"✅ Traditional batch_inference completed in {batch_time:.2f}s")
+        logger.info(f"Traditional batch_inference completed in {batch_time:.2f}s")
         for i, tokens in enumerate(speech_tokens_1):
             logger.info(f"  Sequence {i}: {tokens.numel()} tokens generated")
 
         # Test 2: Optimized batch_inference method
-        logger.info("\n🚀 Test 2: Optimized batch_inference method")
+        logger.info("\nTest 2: Optimized batch_inference method")
         logger.info("-" * 50)
 
         start_time = time.time()
@@ -100,12 +100,12 @@ def test_eos_detection():
         )
         optimized_time = time.time() - start_time
 
-        logger.info(f"✅ Optimized batch_inference completed in {optimized_time:.2f}s")
+        logger.info(f"Optimized batch_inference completed in {optimized_time:.2f}s")
         for i, tokens in enumerate(speech_tokens_2):
             logger.info(f"  Sequence {i}: {tokens.numel()} tokens generated")
 
         # Compare results
-        logger.info("\n📊 Comparison Results")
+        logger.info("\nComparison Results")
         logger.info("-" * 50)
 
         if optimized_time > 0:
@@ -116,16 +116,16 @@ def test_eos_detection():
         early_termination_detected = False
         for i, tokens in enumerate(speech_tokens_1):
             if tokens.numel() < 150:  # Less than max_new_tokens
-                logger.info(f"✅ Sequence {i} terminated early with {tokens.numel()} tokens (< 150 max)")
+                logger.info(f"SUCCESS: Sequence {i} terminated early with {tokens.numel()} tokens (< 150 max)")
                 early_termination_detected = True
 
         if early_termination_detected:
-            logger.info("🎯 SUCCESS: Early termination detected - EOS detection is working!")
+            logger.info("SUCCESS: Early termination detected - EOS detection is working!")
         else:
-            logger.warning("⚠️ WARNING: No early termination detected - sequences may be running to max_new_tokens")
+            logger.warning("WARNING: No early termination detected - sequences may be running to max_new_tokens")
 
         # Test 3: Performance comparison with longer sequences
-        logger.info("\n⚡ Test 3: Performance Impact Analysis")
+        logger.info("\nTest 3: Performance Impact Analysis")
         logger.info("-" * 50)
 
         # Test with small max_new_tokens vs large max_new_tokens
@@ -151,16 +151,16 @@ def test_eos_detection():
         logger.info(f"Large limit (1000 tokens): {large_limit_time:.2f}s")
 
         if abs(small_limit_time - large_limit_time) < 1.0:  # Less than 1 second difference
-            logger.info("✅ SUCCESS: Times are similar - early termination is working!")
-            logger.info("🎯 This confirms that sequences stop at EOS tokens, not at max_new_tokens")
+            logger.info("SUCCESS: Times are similar - early termination is working!")
+            logger.info("This confirms that sequences stop at EOS tokens, not at max_new_tokens")
         else:
-            logger.warning(f"⚠️ WARNING: Large time difference ({large_limit_time/small_limit_time:.1f}x) suggests EOS detection may not be working")
+            logger.warning(f"WARNING: Large time difference ({large_limit_time/small_limit_time:.1f}x) suggests EOS detection may not be working")
 
-        logger.info("\n🎉 EOS Detection Test Completed!")
+        logger.info("\nEOS Detection Test Completed!")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Test failed with error: {e}")
+        logger.error(f"Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -168,6 +168,6 @@ def test_eos_detection():
 if __name__ == "__main__":
     success = test_eos_detection()
     if success:
-        print("\n✅ EOS Detection Test PASSED")
+        print("\nEOS Detection Test PASSED")
     else:
-        print("\n❌ EOS Detection Test FAILED")
+        print("\nEOS Detection Test FAILED")
