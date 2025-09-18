@@ -431,6 +431,16 @@ class ChatterboxMultilingualTTS:
                 # Apply post-processing - ensure proper shape for drop_invalid_tokens
                 if speech_tokens.dim() == 1:
                     speech_tokens = speech_tokens.unsqueeze(0)  # Add batch dim
+
+                # Remove stop token (6562) if it exists - it's not a valid speech token
+                # Find where stop token appears and truncate
+                if (speech_tokens == self.t3.hp.stop_speech_token).any():
+                    stop_idx = (speech_tokens == self.t3.hp.stop_speech_token).nonzero(as_tuple=True)
+                    if len(stop_idx[0]) > 0 and len(stop_idx[1]) > 0:
+                        first_stop = stop_idx[1][0].item()
+                        speech_tokens = speech_tokens[:, :first_stop]
+                        print(f"Sequence {i}: Truncated at stop token, keeping {first_stop} tokens")
+
                 speech_tokens = drop_invalid_tokens(speech_tokens)
 
                 # Skip if all tokens were dropped

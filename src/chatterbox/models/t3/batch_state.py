@@ -156,11 +156,11 @@ class BatchGenerationState:
         self.start_token = start_token
         self.stop_token = stop_token
 
-        # Initialize sequence states
+        # Initialize sequence states (don't include start token in generated_tokens yet)
         self.sequences = [
             SequenceState(
                 sequence_id=i,
-                generated_tokens=torch.tensor([[start_token]], device=device, dtype=torch.long),
+                generated_tokens=torch.empty(1, 0, device=device, dtype=torch.long),  # Start empty
                 position=0
             ) for i in range(batch_size)
         ]
@@ -186,7 +186,11 @@ class BatchGenerationState:
         active_tokens = []
         for seq_id in self.active_sequences:
             seq = self.sequences[seq_id]
-            active_tokens.append(seq.generated_tokens[:, -1:])  # Last token
+            if seq.generated_tokens.size(1) > 0:
+                active_tokens.append(seq.generated_tokens[:, -1:])  # Last token
+            else:
+                # First iteration - use start token
+                active_tokens.append(torch.tensor([[self.start_token]], device=self.device, dtype=torch.long))
 
         if not active_tokens:
             return torch.empty(0, 1, device=self.device, dtype=torch.long)
@@ -275,9 +279,9 @@ class BatchGenerationState:
         """
         results = []
         for seq in self.sequences:
-            # Remove start token and return generated sequence
-            if seq.generated_tokens.size(1) > 1:
-                result = seq.generated_tokens[:, 1:]  # Skip start token
+            # Return generated sequence as-is (no start token to skip)
+            if seq.generated_tokens.size(1) > 0:
+                result = seq.generated_tokens
             else:
                 result = torch.empty(1, 0, device=self.device, dtype=torch.long)
             results.append(result)

@@ -48,9 +48,12 @@ batch_wavs = model.generate_batch(texts)
 batch_time = time.time() - start_time
 print(f"Batch generation time: {batch_time:.2f}s")
 
-# Save batch results
+# Save batch results and check content
 for i, wav in enumerate(batch_wavs):
     ta.save(f"batch_test_{i+1}.wav", wav, model.sr)
+    # Debug: Check if audio has content
+    wav_tensor = wav if torch.is_tensor(wav) else torch.tensor(wav)
+    print(f"  batch_test_{i+1}.wav - Shape: {wav_tensor.shape}, Max: {wav_tensor.abs().max():.4f}, Non-zero: {(wav_tensor != 0).sum().item()}")
 
 # Performance improvement
 speedup = individual_time / batch_time if batch_time > 0 else float('inf')

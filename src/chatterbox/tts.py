@@ -381,6 +381,9 @@ class ChatterboxTTS:
 
             # Post-process speech tokens and run S3Gen inference
             for i, speech_tokens in enumerate(all_speech_tokens):
+                # Debug: Log tokens before processing
+                print(f"Sequence {i}: Received {speech_tokens.numel()} tokens, first 10: {speech_tokens[:10].tolist() if speech_tokens.numel() > 0 else 'empty'}")
+
                 # Skip empty sequences
                 if speech_tokens.numel() == 0:
                     print(f"Warning: Sequence {i} generated no tokens, creating silent audio")
@@ -393,8 +396,24 @@ class ChatterboxTTS:
                 # Apply post-processing - ensure proper shape for drop_invalid_tokens
                 if speech_tokens.dim() == 1:
                     speech_tokens = speech_tokens.unsqueeze(0)  # Add batch dim
+
+                # Debug: Check tokens before drop_invalid_tokens
+                print(f"Sequence {i}: Before drop_invalid_tokens: shape={speech_tokens.shape}, max={speech_tokens.max().item() if speech_tokens.numel() > 0 else 0}")
+
+                # Remove stop token (6562) if it exists - it's not a valid speech token
+                # Find where stop token appears and truncate
+                if (speech_tokens == self.t3.hp.stop_speech_token).any():
+                    stop_idx = (speech_tokens == self.t3.hp.stop_speech_token).nonzero(as_tuple=True)
+                    if len(stop_idx[0]) > 0 and len(stop_idx[1]) > 0:
+                        first_stop = stop_idx[1][0].item()
+                        speech_tokens = speech_tokens[:, :first_stop]
+                        print(f"Sequence {i}: Truncated at stop token, keeping {first_stop} tokens")
+
                 speech_tokens = drop_invalid_tokens(speech_tokens)
                 speech_tokens = speech_tokens[speech_tokens < 6561]
+
+                # Debug: Check tokens after filtering
+                print(f"Sequence {i}: After filtering: {speech_tokens.numel()} tokens remain")
 
                 # Skip if all tokens were dropped
                 if speech_tokens.numel() == 0:
