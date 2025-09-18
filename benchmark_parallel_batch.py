@@ -24,7 +24,7 @@ from dataclasses import dataclass
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from chatterbox import TTS
+from chatterbox import ChatterboxTTS
 from chatterbox.models.t3.batch_state import BatchGenerationState
 from chatterbox.models.t3.inference.batch_alignment_stream_analyzer import BatchAlignmentStreamAnalyzer
 
@@ -50,7 +50,7 @@ class PerformanceBenchmark:
         logger.info(f"Initializing benchmark on {self.device}")
 
         # Initialize TTS model
-        self.tts = TTS(device=self.device)
+        self.tts = ChatterboxTTS.from_pretrained(device=self.device)
 
         # Test data - diverse texts for comprehensive evaluation
         self.test_texts = [
