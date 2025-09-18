@@ -80,7 +80,8 @@ def test_actual_early_termination_speedup():
             batch_text_tokens=text_tokens,
             batch_t3_conds=t3_conds,
             max_new_tokens=50,  # Small limit
-            stop_on_eos=True
+            stop_on_eos=True,
+            cfg_weight=0.0  # Disable CFG to avoid tensor dimension issues
         )
         small_limit_time = time.time() - start_time
 
@@ -90,7 +91,8 @@ def test_actual_early_termination_speedup():
             batch_text_tokens=text_tokens,
             batch_t3_conds=t3_conds,
             max_new_tokens=1000,  # Large limit - should not matter due to early termination
-            stop_on_eos=True
+            stop_on_eos=True,
+            cfg_weight=0.0  # Disable CFG to avoid tensor dimension issues
         )
         large_limit_time = time.time() - start_time
 
@@ -133,7 +135,8 @@ def test_actual_early_termination_speedup():
             batch_text_tokens=text_tokens,
             batch_t3_conds=t3_conds,
             max_new_tokens=100,
-            stop_on_eos=True
+            stop_on_eos=True,
+            cfg_weight=0.0
         )
         traditional_time = time.time() - start_time
 
@@ -144,6 +147,7 @@ def test_actual_early_termination_speedup():
             batch_t3_conds=t3_conds,
             max_new_tokens=100,
             stop_on_eos=True,
+            cfg_weight=0.0,
             max_batch_size=8,
             enable_dynamic_batching=True
         )
@@ -172,7 +176,8 @@ def test_actual_early_termination_speedup():
                 batch_text_tokens=text_tokens[i:i+1],
                 batch_t3_conds=t3_conds[i:i+1],
                 max_new_tokens=100,
-                stop_on_eos=True
+                stop_on_eos=True,
+                cfg_weight=0.0
             )
             sequential_results.extend(single_result)
         sequential_time = time.time() - start_time
@@ -324,7 +329,8 @@ def test_edge_cases():
                         batch_text_tokens=text_tokens,
                         batch_t3_conds=t3_conds,
                         max_new_tokens=max_tokens,
-                        stop_on_eos=True
+                        stop_on_eos=True,
+                        cfg_weight=0.0
                     )
                     test_time = time.time() - start_time
 

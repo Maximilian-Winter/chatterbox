@@ -516,10 +516,13 @@ class T3(nn.Module):
         # Initial forward pass for all sequences
         all_past_key_values = []
         for i in range(batch_size):
-            # For CFG, duplicate the BOS embedding
-            if cfg_weight > 0.0:
+            # Check the actual batch size of the conditioning embeddings
+            cond_batch_size = batch_cond_embeds[i].size(0)
+
+            # Adjust BOS embedding to match conditioning batch size
+            if cond_batch_size == 2:  # CFG mode (conditional + unconditional)
                 seq_bos_embed = torch.cat([bos_embed, bos_embed])
-            else:
+            else:  # Standard mode
                 seq_bos_embed = bos_embed
 
             # Combine conditioning and BOS for this sequence
