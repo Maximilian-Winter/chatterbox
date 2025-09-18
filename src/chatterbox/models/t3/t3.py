@@ -435,6 +435,12 @@ class T3(nn.Module):
         if batch_size == 0:
             return []
 
+        # CFG compatibility check - disable CFG in batch mode for stability
+        if cfg_weight > 0.0 and batch_size > 1:
+            logger.warning(f"⚠️ CFG (cfg_weight={cfg_weight}) disabled in batch mode for tensor compatibility. "
+                          f"Use generate_batch() method for CFG with batches.")
+            cfg_weight = 0.0
+
         # Validate inputs
         for text_tokens in batch_text_tokens:
             _ensure_BOT_EOT(text_tokens, self.hp)
@@ -538,29 +544,7 @@ class T3(nn.Module):
                 return_dict=True,
             )
 
-            # Store the cache but handle CFG batch size issues
-            if cfg_weight > 0.0 and isinstance(output.past_key_values, DynamicCache):
-                # For CFG, we need to ensure cache consistency
-                # The output will have doubled batch size, but we only want to store the conditional part
-                logger.debug(f"Sequence {i}: CFG detected during initialization, processing cache")
-
-                # Create a new cache with only the conditional (first half) of tensors
-                conditional_cache = DynamicCache()
-                for layer_idx in range(len(output.past_key_values.key_cache)):
-                    key_tensor = output.past_key_values.key_cache[layer_idx]
-                    value_tensor = output.past_key_values.value_cache[layer_idx]
-
-                    if key_tensor is not None and value_tensor is not None:
-                        # Take only the first half (conditional part)
-                        half_batch_size = key_tensor.size(0) // 2
-                        cond_keys = key_tensor[:half_batch_size]
-                        cond_values = value_tensor[:half_batch_size]
-                        conditional_cache.update(cond_keys, cond_values, layer_idx)
-                        logger.debug(f"Sequence {i}, Layer {layer_idx}: reduced from {key_tensor.shape} to {cond_keys.shape}")
-
-                all_past_key_values.append(conditional_cache)
-            else:
-                all_past_key_values.append(output.past_key_values)
+            all_past_key_values.append(output.past_key_values)
 
         # Optimize batch state for parallel processing
         batch_state.optimize_for_parallel_processing()
