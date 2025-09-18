@@ -296,3 +296,65 @@ class S3Token2Wav(S3Token2Mel):
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
         return output_wavs, output_sources
+
+    @torch.inference_mode()
+    def inference_batch(
+        self,
+        speech_tokens_list,
+        ref_dict_list=None,
+        ref_wav_list=None,
+        ref_sr_list=None,
+        finalize=True,
+    ):
+        """
+        Generate waveforms for multiple speech token sequences in batch.
+
+        Args:
+            speech_tokens_list: List of speech token tensors
+            ref_dict_list: List of pre-computed reference dictionaries (one per input)
+            ref_wav_list: List of reference waveforms (alternative to ref_dict_list)
+            ref_sr_list: List of reference sample rates (used with ref_wav_list)
+            finalize: Whether streaming is finished
+
+        Returns:
+            List of (waveform, output_sources) tuples
+        """
+        if not isinstance(speech_tokens_list, list):
+            speech_tokens_list = [speech_tokens_list]
+
+        batch_size = len(speech_tokens_list)
+
+        # Handle reference data
+        if ref_dict_list is None and ref_wav_list is None:
+            raise ValueError("Must provide either ref_dict_list or ref_wav_list")
+
+        if ref_dict_list is None:
+            if ref_sr_list is None:
+                ref_sr_list = [S3GEN_SR] * batch_size
+            elif isinstance(ref_sr_list, int):
+                ref_sr_list = [ref_sr_list] * batch_size
+
+            # Convert ref_wav_list to ref_dict_list
+            ref_dict_list = []
+            for ref_wav, ref_sr in zip(ref_wav_list, ref_sr_list):
+                ref_dict = self.embed_ref(ref_wav, ref_sr)
+                ref_dict_list.append(ref_dict)
+
+        # Ensure ref_dict_list matches batch size
+        if len(ref_dict_list) == 1 and batch_size > 1:
+            ref_dict_list = ref_dict_list * batch_size
+        elif len(ref_dict_list) != batch_size:
+            raise ValueError(f"ref_dict_list length ({len(ref_dict_list)}) must match speech_tokens_list length ({batch_size})")
+
+        # Process each sample
+        # TODO: This can be optimized for true batch processing
+        results = []
+        for speech_tokens, ref_dict in zip(speech_tokens_list, ref_dict_list):
+            wav, output_sources = self.inference(
+                speech_tokens=speech_tokens,
+                ref_dict=ref_dict,
+                finalize=finalize,
+            )
+            results.append((wav, output_sources))
+
+        return results

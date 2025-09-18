@@ -392,3 +392,56 @@ class T3(nn.Module):
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
         return predicted_tokens
+
+    @torch.inference_mode()
+    def inference_batch(
+        self,
+        *,
+        t3_conds,
+        text_tokens_list,
+        initial_speech_tokens=None,
+
+        # HF generate args
+        num_return_sequences=1,
+        max_new_tokens=None,
+        stop_on_eos=True,
+        do_sample=True,
+        temperature=0.8,
+        top_p=0.95,
+        min_p=0.05,
+        length_penalty=1.0,
+        repetition_penalty=1.2,
+        cfg_weight=0.5,
+    ):
+        """
+        Batch inference for multiple text inputs with potentially different conditionals.
+
+        Args:
+            t3_conds: List of T3Cond objects, one per batch item
+            text_tokens_list: List of text token tensors, each of shape (1, T) or (2, T) for CFG
+        """
+        batch_size = len(text_tokens_list)
+        assert len(t3_conds) == batch_size, "t3_conds must match text_tokens_list length"
+
+        # Process each sample independently for now
+        # TODO: This can be optimized for true batch processing when conditionals are similar
+        results = []
+        for i in range(batch_size):
+            result = self.inference(
+                t3_cond=t3_conds[i],
+                text_tokens=text_tokens_list[i],
+                initial_speech_tokens=initial_speech_tokens,
+                num_return_sequences=num_return_sequences,
+                max_new_tokens=max_new_tokens,
+                stop_on_eos=stop_on_eos,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_p=top_p,
+                min_p=min_p,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                cfg_weight=cfg_weight,
+            )
+            results.append(result)
+
+        return results

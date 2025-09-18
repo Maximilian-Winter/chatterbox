@@ -272,3 +272,45 @@ class VoiceEncoder(nn.Module):
         mels = [melspectrogram(w, self.hp).T for w in wavs]
 
         return self.embeds_from_mels(mels, as_spk=as_spk, batch_size=batch_size, **kwargs)
+
+    def embeds_from_wavs_batch(
+        self,
+        wavs_list,
+        sample_rate,
+        as_spk=False,
+        batch_size=32,
+        trim_top_db=20,
+        **kwargs
+    ):
+        """
+        Efficiently process multiple lists of wav files (different voice prompts).
+
+        Args:
+            wavs_list: List of wav file lists, where each sublist contains wavs for one voice
+            sample_rate: Sample rate of the input wavs
+            as_spk: Whether to return speaker embeddings or utterance embeddings
+            batch_size: Batch size for processing
+            **kwargs: Additional arguments for embeds_from_wavs
+
+        Returns:
+            List of embeddings, one per voice (list in wavs_list)
+        """
+        if not isinstance(wavs_list, list):
+            wavs_list = [wavs_list]
+
+        results = []
+        for wavs in wavs_list:
+            if not isinstance(wavs, list):
+                wavs = [wavs]
+
+            embeds = self.embeds_from_wavs(
+                wavs=wavs,
+                sample_rate=sample_rate,
+                as_spk=as_spk,
+                batch_size=batch_size,
+                trim_top_db=trim_top_db,
+                **kwargs
+            )
+            results.append(embeds)
+
+        return results

@@ -299,3 +299,189 @@ class ChatterboxMultilingualTTS:
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
+    def generate_batch(
+        self,
+        texts,
+        language_ids,
+        audio_prompt_paths=None,
+        exaggeration=0.5,
+        cfg_weight=0.5,
+        temperature=0.8,
+        repetition_penalty=2.0,
+        min_p=0.05,
+        top_p=1.0,
+        max_batch_size=8,
+    ):
+        """
+        Generate audio for multiple texts in batch.
+
+        Args:
+            texts: List of text strings to synthesize
+            language_ids: List of language IDs (one per text) or single ID for all
+            audio_prompt_paths: List of audio prompt paths (one per text) or single path for all,
+                               or None to use built-in voice
+            max_batch_size: Maximum number of texts to process in a single batch
+            **kwargs: Other generation parameters
+
+        Returns:
+            List of audio tensors, one per input text
+        """
+        if not isinstance(texts, list):
+            texts = [texts]
+
+        if len(texts) == 0:
+            return []
+
+        # Handle language IDs
+        if isinstance(language_ids, str):
+            language_ids = [language_ids] * len(texts)
+        elif len(language_ids) == 1 and len(texts) > 1:
+            language_ids = language_ids * len(texts)
+        else:
+            assert len(language_ids) == len(texts), "language_ids must match texts length"
+
+        # Validate all language IDs
+        for lang_id in language_ids:
+            if lang_id and lang_id.lower() not in SUPPORTED_LANGUAGES:
+                supported_langs = ", ".join(SUPPORTED_LANGUAGES.keys())
+                raise ValueError(
+                    f"Unsupported language_id '{lang_id}'. "
+                    f"Supported languages: {supported_langs}"
+                )
+
+        # Handle audio prompt paths
+        if audio_prompt_paths is None:
+            audio_prompt_paths = [None] * len(texts)
+        elif isinstance(audio_prompt_paths, str):
+            # Single path for all texts
+            audio_prompt_paths = [audio_prompt_paths] * len(texts)
+        elif len(audio_prompt_paths) == 1 and len(texts) > 1:
+            # Single path for all texts
+            audio_prompt_paths = audio_prompt_paths * len(texts)
+        else:
+            assert len(audio_prompt_paths) == len(texts), "audio_prompt_paths must match texts length"
+
+        # Process in chunks if batch too large
+        all_results = []
+        for i in range(0, len(texts), max_batch_size):
+            batch_texts = texts[i:i + max_batch_size]
+            batch_lang_ids = language_ids[i:i + max_batch_size]
+            batch_prompts = audio_prompt_paths[i:i + max_batch_size]
+
+            batch_results = self._generate_batch_chunk(
+                batch_texts,
+                batch_lang_ids,
+                batch_prompts,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                min_p=min_p,
+                top_p=top_p,
+            )
+            all_results.extend(batch_results)
+
+        return all_results
+
+    def _generate_batch_chunk(
+        self,
+        texts,
+        language_ids,
+        audio_prompt_paths,
+        exaggeration=0.5,
+        cfg_weight=0.5,
+        temperature=0.8,
+        repetition_penalty=2.0,
+        min_p=0.05,
+        top_p=1.0,
+    ):
+        """Generate audio for a chunk of texts that fit in memory."""
+        batch_size = len(texts)
+
+        # Prepare conditionals for each text
+        batch_conds = []
+        for i, audio_prompt_path in enumerate(audio_prompt_paths):
+            if audio_prompt_path:
+                self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+            else:
+                assert self.conds is not None, f"Please `prepare_conditionals` first or specify `audio_prompt_path` for text {i}"
+
+            # Update exaggeration if needed
+            if float(exaggeration) != float(self.conds.t3.emotion_adv[0, 0, 0].item()):
+                _cond = self.conds.t3
+                self.conds.t3 = T3Cond(
+                    speaker_emb=_cond.speaker_emb,
+                    cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                    emotion_adv=exaggeration * torch.ones(1, 1, 1),
+                ).to(device=self.device)
+
+            batch_conds.append((self.conds.t3, self.conds.gen))
+
+        # Normalize and tokenize all texts
+        normalized_texts = [punc_norm(text) for text in texts]
+        text_tokens_list = [
+            self.tokenizer.text_to_tokens(text, language_id=lang_id.lower() if lang_id else None).to(self.device)
+            for text, lang_id in zip(normalized_texts, language_ids)
+        ]
+
+        # Pad text tokens to same length
+        max_text_len = max(tokens.size(1) for tokens in text_tokens_list)
+        padded_text_tokens = []
+        text_lens = []
+
+        for tokens in text_tokens_list:
+            text_lens.append(tokens.size(1))
+            if tokens.size(1) < max_text_len:
+                pad_size = max_text_len - tokens.size(1)
+                tokens = F.pad(tokens, (0, pad_size), value=0)
+            padded_text_tokens.append(tokens)
+
+        # Stack into batch
+        batch_text_tokens = torch.cat(padded_text_tokens, dim=0)  # (B, T)
+        batch_text_tokens = torch.cat([batch_text_tokens, batch_text_tokens], dim=0)  # CFG
+
+        # Add start/stop tokens
+        sot = self.t3.hp.start_text_token
+        eot = self.t3.hp.stop_text_token
+        batch_text_tokens = F.pad(batch_text_tokens, (1, 0), value=sot)
+        batch_text_tokens = F.pad(batch_text_tokens, (0, 1), value=eot)
+
+        # Generate speech tokens for the batch
+        all_speech_tokens = []
+        for i in range(batch_size):
+            # Get conditionals for this sample
+            t3_cond, gen_cond = batch_conds[i]
+
+            # Extract text tokens for this sample (CFG)
+            sample_text_tokens = torch.stack([batch_text_tokens[i], batch_text_tokens[i + batch_size]])
+
+            with torch.inference_mode():
+                speech_tokens = self.t3.inference(
+                    t3_cond=t3_cond,
+                    text_tokens=sample_text_tokens,
+                    max_new_tokens=1000,
+                    temperature=temperature,
+                    cfg_weight=cfg_weight,
+                    repetition_penalty=repetition_penalty,
+                    min_p=min_p,
+                    top_p=top_p,
+                )
+                speech_tokens = speech_tokens[0]  # Extract conditional batch
+                speech_tokens = drop_invalid_tokens(speech_tokens)
+                speech_tokens = speech_tokens.to(self.device)
+                all_speech_tokens.append((speech_tokens, gen_cond))
+
+        # Generate waveforms
+        results = []
+        for speech_tokens, gen_cond in all_speech_tokens:
+            with torch.inference_mode():
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=speech_tokens,
+                    ref_dict=gen_cond,
+                )
+                wav = wav.squeeze(0).detach().cpu().numpy()
+                watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+                results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
+
+        return results
