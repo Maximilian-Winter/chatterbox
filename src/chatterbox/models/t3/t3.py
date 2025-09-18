@@ -893,7 +893,18 @@ class T3(nn.Module):
         )
 
         for i, inp in enumerate(all_inputs):
-            unified_inputs[i, :inp.size(1)] = inp.squeeze(0)
+            # Handle input tensor that may have batch dimension or not
+            if inp.dim() == 3 and inp.size(0) == 1:
+                # Standard case: [1, seq_len, hidden_size] -> [seq_len, hidden_size]
+                unified_inputs[i, :inp.size(1)] = inp.squeeze(0)
+            elif inp.dim() == 3:
+                # Batch dimension > 1, take the first element: [batch, seq_len, hidden_size] -> [seq_len, hidden_size]
+                unified_inputs[i, :inp.size(1)] = inp[0]
+            elif inp.dim() == 2:
+                # Already 2D: [seq_len, hidden_size]
+                unified_inputs[i, :inp.size(1)] = inp
+            else:
+                raise ValueError(f"Unexpected input tensor shape: {inp.shape}")
 
         # Single unified forward pass for initialization
         output = self.patched_model(

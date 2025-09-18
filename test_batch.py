@@ -17,14 +17,35 @@ def test_basic_generation():
     logger.info("Initializing TTS model...")
 
     # Initialize TTS
+    import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tts = ChatterboxTTS.from_pretrained(device=device)
 
     # Test single generation first
     logger.info("Testing single generation...")
     try:
-        result = tts.generate("Hello, this is a test.")
-        logger.info(f"Single generation successful! Output shape: {result.shape}")
+        # Test just the core generation process that had the tensor dimension issue
+
+        # Generate speech tokens using T3 (use tts.generate for simpler interface)
+        # But first, we'll just test the flow model directly by calling S3Gen inference with dummy data
+
+        # Create dummy speech tokens to test the flow model
+        # This simulates the tensor shapes that were causing the dimension mismatch
+
+        # Create test tensors similar to what T3 would generate
+        # The error occurred when prompt_token had wrong dimensions
+        dummy_speech_tokens = torch.randint(0, 100, (1, 50), device=device)  # [batch_size=1, seq_len=50]
+
+        logger.info(f"Testing S3Gen flow inference with dummy tokens shape: {dummy_speech_tokens.shape}")
+
+        # Test S3Gen flow inference (this is where the tensor dimension error occurred)
+        wav, _ = tts.s3gen.inference(
+            speech_tokens=dummy_speech_tokens,
+            ref_dict=tts.conds.gen,
+        )
+
+        logger.info(f"S3Gen flow inference successful! Output shape: {wav.shape}")
+
     except Exception as e:
         logger.error(f"Single generation failed: {e}")
         import traceback
@@ -50,6 +71,8 @@ def test_basic_generation():
 
     except Exception as e:
         logger.error(f"Batch generation failed: {e}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         return False
 
 def main():

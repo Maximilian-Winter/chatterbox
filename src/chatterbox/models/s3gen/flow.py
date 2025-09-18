@@ -144,9 +144,41 @@ class MaskedDiffWithXvec(torch.nn.Module):
         embedding = self.spk_embed_affine_layer(embedding)
 
         # concat text and prompt_text - handle batch dimension mismatch carefully
+
+        # First, handle prompt_token dimension issues similar to the second inference method
+        if len(prompt_token.shape) == 2 and prompt_token.shape[0] > 1 and token.shape[0] == 1:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Fixing prompt_token dimensions: {prompt_token.shape} -> batch format for single inference")
+
+            # For 2D prompt_token, we need to determine which dimension is sequence length
+            # Compare with token.shape[1] which we know is the correct sequence length
+            if prompt_token.shape[1] == token.shape[1]:
+                # [batch_wrong, seq_len] case - first dimension is wrong batch size, second is correct seq_len
+                prompt_token = prompt_token[0:1, :]  # [batch_wrong, seq_len] -> [1, seq_len]
+                logger.info(f"Fixed prompt_token from [batch_wrong, seq_len] to {prompt_token.shape}")
+            elif prompt_token.shape[0] == token.shape[1]:
+                # [seq_len, batch_wrong] case - first dimension is seq_len, second is wrong batch
+                prompt_token = prompt_token.transpose(0, 1)[0:1, :]  # [seq_len, batch_wrong] -> [batch_wrong, seq_len] -> [1, seq_len]
+                logger.info(f"Fixed prompt_token from [seq_len, batch_wrong] to {prompt_token.shape}")
+            else:
+                # Fallback: assume the larger dimension is sequence length
+                if prompt_token.shape[0] < prompt_token.shape[1]:
+                    prompt_token = prompt_token[0:1, :]
+                else:
+                    prompt_token = prompt_token.transpose(0, 1)[0:1, :]
+                logger.info(f"Fixed prompt_token using fallback logic to {prompt_token.shape}")
+
+            # Also fix prompt_token_len to match the new batch size
+            if isinstance(prompt_token_len, torch.Tensor) and prompt_token_len.numel() > 1:
+                if len(prompt_token_len.shape) > 0 and prompt_token_len.shape[0] > 1:
+                    prompt_token_len = prompt_token_len[0:1] if prompt_token_len.shape[0] > 1 else prompt_token_len
+            elif not isinstance(prompt_token_len, torch.Tensor):
+                prompt_token_len = torch.tensor([prompt_token_len], device=prompt_token.device)
+
         token_len1, token_len2 = prompt_token.shape[1], token.shape[1]
 
-        # Only expand if prompt_token has batch_size=1 and token has larger batch_size
+        # Handle case 1: prompt_token has batch_size=1 and token has larger batch_size
         if prompt_token.shape[0] == 1 and token.shape[0] > 1:
             # Broadcast prompt_token to match token batch size
             prompt_token = prompt_token.expand(token.shape[0], -1)
@@ -159,12 +191,29 @@ class MaskedDiffWithXvec(torch.nn.Module):
             else:
                 # Handle case where prompt_token_len is a scalar
                 prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
+
+        # Handle case 2: token has batch_size=1 and prompt_token has larger batch_size
+        elif token.shape[0] == 1 and prompt_token.shape[0] > 1:
+            # Broadcast token to match prompt_token batch size
+            token = token.expand(prompt_token.shape[0], -1)
+            # Handle token_len expansion safely
+            if isinstance(token_len, torch.Tensor):
+                if token_len.numel() == 1:
+                    token_len = token_len.expand(prompt_token.shape[0])
+                elif len(token_len.shape) == 0:
+                    token_len = token_len.unsqueeze(0).expand(prompt_token.shape[0])
+            else:
+                # Handle case where token_len is a scalar
+                token_len = torch.tensor([token_len] * prompt_token.shape[0], device=token.device)
+
+        # Handle case 3: Both have different batch sizes and neither is 1 (error case)
         elif prompt_token.shape[0] != token.shape[0]:
-            # Mismatch that we can't handle - fall back to original behavior for single inference
+            # This is a true mismatch that we can't handle
             import logging
             logger = logging.getLogger(__name__)
             logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
-            # For single inference case, this might be normal - skip batch processing logic
+            raise ValueError(f"Incompatible batch dimensions: prompt_token batch_size={prompt_token.shape[0]}, token batch_size={token.shape[0]}. "
+                           f"One tensor must have batch_size=1 for broadcasting, or both must have the same batch_size.")
 
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
@@ -187,7 +236,13 @@ class MaskedDiffWithXvec(torch.nn.Module):
 
         # Handle prompt_feat batch dimension
         if prompt_feat.shape[0] != batch_size:
-            prompt_feat = prompt_feat.expand(batch_size, -1, -1)
+            if prompt_feat.shape[0] == 1:
+                # Expand prompt_feat to match batch_size
+                prompt_feat = prompt_feat.expand(batch_size, -1, -1)
+            else:
+                # Mismatch we can't handle with expand - this is an error
+                raise ValueError(f"Incompatible prompt_feat batch dimension: prompt_feat.shape[0]={prompt_feat.shape[0]}, "
+                               f"batch_size={batch_size}. For expansion, prompt_feat must have batch_size=1.")
 
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
@@ -283,13 +338,70 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             embedding = embedding.half()
 
         # Support batch processing - removed batch_size=1 constraint
+        # Handle potential dimension confusion where tokens might come in wrong shapes
+        # For single inference, ensure both prompt_token and token have consistent batch dimensions
+
+        # Log the shapes for debugging
+        logger.info(f"Input shapes: prompt_token={prompt_token.shape}, token={token.shape}, prompt_feat={prompt_feat.shape}")
+
+        # Handle prompt_token dimension issues
+        if len(prompt_token.shape) == 2 and prompt_token.shape[0] > 1 and token.shape[0] == 1:
+            logger.warning(f"Fixing prompt_token dimensions: {prompt_token.shape} -> batch format for single inference")
+
+            # For 2D prompt_token, we need to determine which dimension is sequence length
+            # Compare with token.shape[1] which we know is the correct sequence length
+            if prompt_token.shape[1] == token.shape[1]:
+                # [batch_wrong, seq_len] case - first dimension is wrong batch size, second is correct seq_len
+                # Take the first element of the wrong batch dimension
+                prompt_token = prompt_token[0:1, :]  # [batch_wrong, seq_len] -> [1, seq_len]
+                logger.info(f"Fixed prompt_token from [batch_wrong, seq_len] to {prompt_token.shape}")
+            elif prompt_token.shape[0] == token.shape[1]:
+                # [seq_len, batch_wrong] case - first dimension is seq_len, second is wrong batch
+                # Transpose to get correct shape
+                prompt_token = prompt_token.transpose(0, 1)[0:1, :]  # [seq_len, batch_wrong] -> [batch_wrong, seq_len] -> [1, seq_len]
+                logger.info(f"Fixed prompt_token from [seq_len, batch_wrong] to {prompt_token.shape}")
+            else:
+                # Fallback: assume the larger dimension is sequence length
+                if prompt_token.shape[0] < prompt_token.shape[1]:
+                    # [batch_wrong, seq_len] case
+                    prompt_token = prompt_token[0:1, :]
+                else:
+                    # [seq_len, batch_wrong] case
+                    prompt_token = prompt_token.transpose(0, 1)[0:1, :]
+                logger.info(f"Fixed prompt_token using fallback logic to {prompt_token.shape}")
+
+            # Also fix prompt_token_len to match the new batch size
+            if isinstance(prompt_token_len, torch.Tensor) and prompt_token_len.numel() > 1:
+                if len(prompt_token_len.shape) > 0 and prompt_token_len.shape[0] > 1:
+                    prompt_token_len = prompt_token_len[0:1] if prompt_token_len.shape[0] > 1 else prompt_token_len
+            elif not isinstance(prompt_token_len, torch.Tensor):
+                # Convert scalar to tensor
+                prompt_token_len = torch.tensor([prompt_token_len], device=prompt_token.device)
+
+        # Handle prompt_feat dimension issues
+        if len(prompt_feat.shape) >= 2 and prompt_feat.shape[0] > 1 and prompt_feat.shape[0] != token.shape[0]:
+            logger.warning(f"Fixing prompt_feat dimensions: {prompt_feat.shape} -> reshaping for single inference")
+
+            # prompt_feat likely has shape [seq_len, feature_len, embed_dim] but should be [batch_size=1, feature_len, embed_dim]
+            # Take the average or first element across the sequence dimension
+            if len(prompt_feat.shape) == 3:
+                # [seq_len, feature_len, embed_dim] -> [1, feature_len, embed_dim]
+                # Use mean across sequence dimension for stability
+                prompt_feat = prompt_feat.mean(dim=0, keepdim=True)  # [seq_len, feature_len, embed_dim] -> [1, feature_len, embed_dim]
+            else:
+                # For 2D case, just add batch dimension
+                prompt_feat = prompt_feat.unsqueeze(0)  # Add batch dimension
+
+        # Log the fixed shapes
+        logger.info(f"Fixed shapes: prompt_token={prompt_token.shape}, token={token.shape}, prompt_feat={prompt_feat.shape}")
+
         batch_size = token.shape[0]
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
         # concat text and prompt_text - handle batch dimension mismatch carefully
-        # Only expand if prompt_token has batch_size=1 and token has larger batch_size
+        # Handle case 1: prompt_token has batch_size=1 and token has larger batch_size
         if prompt_token.shape[0] == 1 and token.shape[0] > 1:
             # Broadcast prompt_token to match token batch size
             prompt_token = prompt_token.expand(token.shape[0], -1)
@@ -302,9 +414,27 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             else:
                 # Handle case where prompt_token_len is a scalar
                 prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
+
+        # Handle case 2: token has batch_size=1 and prompt_token has larger batch_size
+        elif token.shape[0] == 1 and prompt_token.shape[0] > 1:
+            # Broadcast token to match prompt_token batch size
+            token = token.expand(prompt_token.shape[0], -1)
+            # Handle token_len expansion safely
+            if isinstance(token_len, torch.Tensor):
+                if token_len.numel() == 1:
+                    token_len = token_len.expand(prompt_token.shape[0])
+                elif len(token_len.shape) == 0:
+                    token_len = token_len.unsqueeze(0).expand(prompt_token.shape[0])
+            else:
+                # Handle case where token_len is a scalar
+                token_len = torch.tensor([token_len] * prompt_token.shape[0], device=token.device)
+
+        # Handle case 3: Both have different batch sizes and neither is 1 (error case)
         elif prompt_token.shape[0] != token.shape[0]:
-            # Mismatch that we can't handle - this might indicate a problem
+            # This is a true mismatch that we can't handle
             logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
+            raise ValueError(f"Incompatible batch dimensions: prompt_token batch_size={prompt_token.shape[0]}, token batch_size={token.shape[0]}. "
+                           f"One tensor must have batch_size=1 for broadcasting, or both must have the same batch_size.")
 
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
@@ -322,7 +452,13 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
 
         # Handle prompt_feat batch dimension
         if prompt_feat.shape[0] != batch_size:
-            prompt_feat = prompt_feat.expand(batch_size, -1, -1)
+            if prompt_feat.shape[0] == 1:
+                # Expand prompt_feat to match batch_size
+                prompt_feat = prompt_feat.expand(batch_size, -1, -1)
+            else:
+                # Mismatch we can't handle with expand - this is an error
+                raise ValueError(f"Incompatible prompt_feat batch dimension: prompt_feat.shape[0]={prompt_feat.shape[0]}, "
+                               f"batch_size={batch_size}. For expansion, prompt_feat must have batch_size=1.")
 
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
