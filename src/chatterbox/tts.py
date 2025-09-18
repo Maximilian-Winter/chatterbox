@@ -380,12 +380,29 @@ class ChatterboxTTS:
             )
 
             # Post-process speech tokens and run S3Gen inference
-            for speech_tokens in all_speech_tokens:
+            for i, speech_tokens in enumerate(all_speech_tokens):
+                # Skip empty sequences
+                if speech_tokens.numel() == 0:
+                    print(f"Warning: Sequence {i} generated no tokens, creating silent audio")
+                    # Create a short silent audio instead
+                    silent_duration = 1.0  # 1 second
+                    silent_wav = torch.zeros(1, int(silent_duration * self.sr))
+                    results.append(silent_wav)
+                    continue
+
                 # Apply post-processing - ensure proper shape for drop_invalid_tokens
                 if speech_tokens.dim() == 1:
                     speech_tokens = speech_tokens.unsqueeze(0)  # Add batch dim
                 speech_tokens = drop_invalid_tokens(speech_tokens)
                 speech_tokens = speech_tokens[speech_tokens < 6561]
+
+                # Skip if all tokens were dropped
+                if speech_tokens.numel() == 0:
+                    print(f"Warning: Sequence {i} had all tokens dropped, creating silent audio")
+                    silent_duration = 1.0
+                    silent_wav = torch.zeros(1, int(silent_duration * self.sr))
+                    results.append(silent_wav)
+                    continue
 
                 # Ensure proper shape for S3Gen (expects batch dimension)
                 if speech_tokens.dim() == 1:
