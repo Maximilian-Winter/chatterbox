@@ -508,18 +508,6 @@ def main():
     # Generate plots
     benchmark.plot_performance_charts()
 
-    logger.info("\n" + "="*60)
-    logger.info("BENCHMARK COMPLETE")
-    logger.info("="*60)
-    logger.info("Key Achievements:")
-    logger.info("• T3 parallel token generation: 3-5x speedup")
-    logger.info("• Unified KV-cache management: 1.5-2x speedup")
-    logger.info("• Batch processing optimizations: 2-3x speedup")
-    logger.info("• Overall pipeline improvement: 5-10x speedup")
-    logger.info("• Memory-efficient attention patterns")
-    logger.info("• Dynamic batch size optimization")
-    logger.info("="*60)
-
 
 if __name__ == "__main__":
     main()
