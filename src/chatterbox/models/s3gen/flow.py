@@ -145,6 +145,15 @@ class MaskedDiffWithXvec(torch.nn.Module):
 
         # concat text and prompt_text - handle batch dimension mismatch carefully
 
+        # Handle embedding dimension issues - similar to prompt_token
+        if len(embedding.shape) == 2 and embedding.shape[0] > 1 and token.shape[0] == 1:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Fixing embedding dimensions: {embedding.shape} -> batch format for single inference")
+            # Take the first embedding if it's multi-dimensional
+            embedding = embedding[0:1, :]
+            logger.info(f"Fixed embedding to {embedding.shape}")
+
         # First, handle prompt_token dimension issues similar to the second inference method
         if len(prompt_token.shape) == 2 and prompt_token.shape[0] > 1 and token.shape[0] == 1:
             import logging
@@ -339,7 +348,14 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         # For single inference, ensure both prompt_token and token have consistent batch dimensions
 
         # Log the shapes for debugging
-        logger.info(f"Input shapes: prompt_token={prompt_token.shape}, token={token.shape}, prompt_feat={prompt_feat.shape}")
+        logger.info(f"Input shapes: prompt_token={prompt_token.shape}, token={token.shape}, prompt_feat={prompt_feat.shape}, embedding={embedding.shape}")
+
+        # Handle embedding dimension issues - similar to prompt_token
+        if len(embedding.shape) == 2 and embedding.shape[0] > 1 and token.shape[0] == 1:
+            logger.warning(f"Fixing embedding dimensions: {embedding.shape} -> batch format for single inference")
+            # Take the first embedding if it's multi-dimensional
+            embedding = embedding[0:1, :]
+            logger.info(f"Fixed embedding to {embedding.shape}")
 
         # Handle prompt_token dimension issues
         if len(prompt_token.shape) == 2 and prompt_token.shape[0] > 1 and token.shape[0] == 1:
