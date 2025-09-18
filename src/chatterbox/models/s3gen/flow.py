@@ -169,12 +169,9 @@ class MaskedDiffWithXvec(torch.nn.Module):
                     prompt_token = prompt_token.transpose(0, 1)[0:1, :]
                 logger.info(f"Fixed prompt_token using fallback logic to {prompt_token.shape}")
 
-            # Also fix prompt_token_len to match the new batch size
-            if isinstance(prompt_token_len, torch.Tensor) and prompt_token_len.numel() > 1:
-                if len(prompt_token_len.shape) > 0 and prompt_token_len.shape[0] > 1:
-                    prompt_token_len = prompt_token_len[0:1] if prompt_token_len.shape[0] > 1 else prompt_token_len
-            elif not isinstance(prompt_token_len, torch.Tensor):
-                prompt_token_len = torch.tensor([prompt_token_len], device=prompt_token.device)
+            # Also fix prompt_token_len to match the new prompt_token sequence length
+            # The prompt_token_len should be the actual sequence length of the reshaped prompt_token
+            prompt_token_len = torch.tensor([prompt_token.shape[1]], device=prompt_token.device)
 
         token_len1, token_len2 = prompt_token.shape[1], token.shape[1]
 
@@ -370,13 +367,9 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                     prompt_token = prompt_token.transpose(0, 1)[0:1, :]
                 logger.info(f"Fixed prompt_token using fallback logic to {prompt_token.shape}")
 
-            # Also fix prompt_token_len to match the new batch size
-            if isinstance(prompt_token_len, torch.Tensor) and prompt_token_len.numel() > 1:
-                if len(prompt_token_len.shape) > 0 and prompt_token_len.shape[0] > 1:
-                    prompt_token_len = prompt_token_len[0:1] if prompt_token_len.shape[0] > 1 else prompt_token_len
-            elif not isinstance(prompt_token_len, torch.Tensor):
-                # Convert scalar to tensor
-                prompt_token_len = torch.tensor([prompt_token_len], device=prompt_token.device)
+            # Also fix prompt_token_len to match the new prompt_token sequence length
+            # The prompt_token_len should be the actual sequence length of the reshaped prompt_token
+            prompt_token_len = torch.tensor([prompt_token.shape[1]], device=prompt_token.device)
 
         # Handle prompt_feat dimension issues
         if len(prompt_feat.shape) >= 2 and prompt_feat.shape[0] > 1 and prompt_feat.shape[0] != token.shape[0]:
@@ -444,13 +437,24 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         h, h_lengths = self.encoder(token, token_len)
         if finalize is False:
             h = h[:, :-self.pre_lookahead_len * self.token_mel_ratio]
-        mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
+
+        # Calculate mel_len1 and mel_len2 based on the actual token proportions
+        # prompt_token_len and token_len contain the actual sequence lengths
+        total_tokens = prompt_token_len + token_len
+        if isinstance(prompt_token_len, torch.Tensor):
+            prompt_ratio = prompt_token_len.float() / total_tokens.float()
+        else:
+            prompt_ratio = float(prompt_token_len) / float(total_tokens)
+
+        # mel_len1 should be proportional to the prompt tokens in the encoded sequence
+        mel_len1 = int((prompt_ratio * h.shape[1]).item() if isinstance(prompt_ratio, torch.Tensor) else prompt_ratio * h.shape[1])
+        mel_len2 = h.shape[1] - mel_len1
         h = self.encoder_proj(h)
 
         # get conditions - handle batch processing
         conds = torch.zeros([batch_size, mel_len1 + mel_len2, self.output_size], device=token.device).to(h.dtype)
 
-        # Handle prompt_feat batch dimension
+        # Handle prompt_feat batch dimension and resize to match mel_len1
         if prompt_feat.shape[0] != batch_size:
             if prompt_feat.shape[0] == 1:
                 # Expand prompt_feat to match batch_size
@@ -459,6 +463,17 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
                 # Mismatch we can't handle with expand - this is an error
                 raise ValueError(f"Incompatible prompt_feat batch dimension: prompt_feat.shape[0]={prompt_feat.shape[0]}, "
                                f"batch_size={batch_size}. For expansion, prompt_feat must have batch_size=1.")
+
+        # Adjust prompt_feat to match mel_len1 if necessary
+        if prompt_feat.shape[1] != mel_len1:
+            if prompt_feat.shape[1] > mel_len1:
+                # Truncate prompt_feat to mel_len1
+                prompt_feat = prompt_feat[:, :mel_len1, :]
+            else:
+                # Pad prompt_feat to mel_len1 (repeat last frame)
+                padding_needed = mel_len1 - prompt_feat.shape[1]
+                last_frame = prompt_feat[:, -1:, :].expand(-1, padding_needed, -1)
+                prompt_feat = torch.cat([prompt_feat, last_frame], dim=1)
 
         conds[:, :mel_len1] = prompt_feat
         conds = conds.transpose(1, 2)
