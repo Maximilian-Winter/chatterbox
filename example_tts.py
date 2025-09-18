@@ -26,6 +26,6 @@ ta.save("test-2.wav", wav, multilingual_model.sr)
 
 
 # If you want to synthesize with a different voice, specify the audio prompt
-AUDIO_PROMPT_PATH = "YOUR_FILE.wav"
+AUDIO_PROMPT_PATH = "voice.wav"
 wav = model.generate(text, audio_prompt_path=AUDIO_PROMPT_PATH)
 ta.save("test-3.wav", wav, model.sr)
