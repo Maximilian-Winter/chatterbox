@@ -70,6 +70,7 @@ class BatchKVCache:
         """
         Get past key values in HuggingFace DynamicCache format for unified batch processing.
         Only returns data for currently active sequences.
+        Ensures consistent batch size handling for CFG and other scenarios.
 
         Returns:
             DynamicCache object containing keys and values for each layer, filtered to active sequences
@@ -99,6 +100,11 @@ class BatchKVCache:
         # Create DynamicCache instance
         cache = DynamicCache()
 
+        # Debug logging for cache extraction
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Creating DynamicCache for {active_batch_size} active sequences")
+
         for layer_idx in range(self.num_layers):
             if layer_idx in self.keys_cache:
                 # Extract active sequences and trim to actual lengths
@@ -111,8 +117,15 @@ class BatchKVCache:
                     keys = keys[:, :, :max_len, :]
                     values = values[:, :, :max_len, :]
 
+                    # Verify tensor shapes before adding to cache
+                    expected_shape = (active_batch_size, self.num_heads, max_len, self.head_dim)
+                    if keys.shape != expected_shape:
+                        logger.warning(f"Layer {layer_idx}: keys shape mismatch. "
+                                     f"Expected {expected_shape}, got {keys.shape}")
+
                     # Update cache with properly shaped tensors
                     cache.update(keys, values, layer_idx)
+                    logger.debug(f"Layer {layer_idx}: Added keys/values with shape {keys.shape}")
                 else:
                     # For empty sequences, add empty tensors with correct shape
                     empty_keys = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
@@ -120,6 +133,7 @@ class BatchKVCache:
                     empty_values = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
                                              device=self.device, dtype=self.dtype)
                     cache.update(empty_keys, empty_values, layer_idx)
+                    logger.debug(f"Layer {layer_idx}: Added empty tensors for inactive sequences")
             else:
                 # Add empty tensors for missing layers
                 empty_keys = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
@@ -127,6 +141,7 @@ class BatchKVCache:
                 empty_values = torch.zeros(active_batch_size, self.num_heads, 0, self.head_dim,
                                          device=self.device, dtype=self.dtype)
                 cache.update(empty_keys, empty_values, layer_idx)
+                logger.debug(f"Layer {layer_idx}: Added empty tensors for missing layer")
 
         return cache
 
@@ -165,36 +180,57 @@ class BatchKVCache:
                           active_indices: torch.Tensor, active_batch_size: int):
         """
         Update cache for a specific layer with proper batch size handling.
+        Handles CFG batch size doubling and other batch size mismatches.
         """
         if new_keys is None or new_values is None:
             return
 
+        # Debug logging for tensor shape analysis
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Layer {layer_idx}: new_keys.shape={new_keys.shape}, "
+                    f"expected active_batch_size={active_batch_size}")
+
         # Handle batch size mismatch (e.g., CFG scenarios)
-        if new_keys.size(0) != active_batch_size:
-            # Take every second element for CFG or handle appropriately
-            if new_keys.size(0) == active_batch_size * 2:
-                new_keys = new_keys[::2]  # Take every second element
-                new_values = new_values[::2]
+        original_batch_size = new_keys.size(0)
+        if original_batch_size != active_batch_size:
+            if original_batch_size == active_batch_size * 2:
+                # CFG mode: conditional + unconditional sequences
+                # Take only the conditional sequences (first half)
+                logger.debug(f"CFG detected: reducing batch from {original_batch_size} to {active_batch_size}")
+                new_keys = new_keys[:active_batch_size]  # Take first half (conditional)
+                new_values = new_values[:active_batch_size]
+            elif original_batch_size > active_batch_size:
+                # General case: truncate to active batch size
+                logger.debug(f"Truncating batch from {original_batch_size} to {active_batch_size}")
+                new_keys = new_keys[:active_batch_size]
+                new_values = new_values[:active_batch_size]
             else:
-                # Handle other batch size mismatches
-                min_batch = min(new_keys.size(0), active_batch_size)
-                new_keys = new_keys[:min_batch]
-                new_values = new_values[:min_batch]
-                active_indices = active_indices[:min_batch]
+                # Handle case where we have fewer keys than expected
+                logger.warning(f"Fewer keys than expected: {original_batch_size} < {active_batch_size}")
+                # Pad active_indices to match available keys
+                active_indices = active_indices[:original_batch_size]
+                active_batch_size = original_batch_size
 
         current_seq_len = new_keys.size(2)
+        final_batch_size = new_keys.size(0)
+
+        # Ensure we don't exceed available indices
+        available_indices = active_indices[:final_batch_size]
 
         # Store in unified cache
-        for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
+        for i, batch_idx in enumerate(available_indices):
             current_len = self.current_lengths[batch_idx].item()
             end_pos = current_len + current_seq_len
 
             if end_pos <= self.max_seq_len:
                 self.keys_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_keys[i]
                 self.values_cache[layer_idx][batch_idx, :, current_len:end_pos, :] = new_values[i]
+            else:
+                logger.warning(f"Sequence {batch_idx} exceeds max_seq_len: {end_pos} > {self.max_seq_len}")
 
         # Update current lengths after storing new data
-        for i, batch_idx in enumerate(active_indices[:new_keys.size(0)]):
+        for i, batch_idx in enumerate(available_indices):
             self.current_lengths[batch_idx] += current_seq_len
 
     def update_sequence_states(self, completed_indices: torch.Tensor):

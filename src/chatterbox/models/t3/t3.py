@@ -513,7 +513,7 @@ class T3(nn.Module):
         if self.hp.input_pos_emb == "learned":
             bos_embed = bos_embed + self.speech_pos_emb.get_fixed_embedding(0)
 
-        # Initial forward pass for all sequences
+        # Initial forward pass for all sequences with CFG-aware cache handling
         all_past_key_values = []
         for i in range(batch_size):
             # Check the actual batch size of the conditioning embeddings
@@ -537,7 +537,30 @@ class T3(nn.Module):
                 output_hidden_states=True,
                 return_dict=True,
             )
-            all_past_key_values.append(output.past_key_values)
+
+            # Store the cache but handle CFG batch size issues
+            if cfg_weight > 0.0 and isinstance(output.past_key_values, DynamicCache):
+                # For CFG, we need to ensure cache consistency
+                # The output will have doubled batch size, but we only want to store the conditional part
+                logger.debug(f"Sequence {i}: CFG detected during initialization, processing cache")
+
+                # Create a new cache with only the conditional (first half) of tensors
+                conditional_cache = DynamicCache()
+                for layer_idx in range(len(output.past_key_values.key_cache)):
+                    key_tensor = output.past_key_values.key_cache[layer_idx]
+                    value_tensor = output.past_key_values.value_cache[layer_idx]
+
+                    if key_tensor is not None and value_tensor is not None:
+                        # Take only the first half (conditional part)
+                        half_batch_size = key_tensor.size(0) // 2
+                        cond_keys = key_tensor[:half_batch_size]
+                        cond_values = value_tensor[:half_batch_size]
+                        conditional_cache.update(cond_keys, cond_values, layer_idx)
+                        logger.debug(f"Sequence {i}, Layer {layer_idx}: reduced from {key_tensor.shape} to {cond_keys.shape}")
+
+                all_past_key_values.append(conditional_cache)
+            else:
+                all_past_key_values.append(output.past_key_values)
 
         # Optimize batch state for parallel processing
         batch_state.optimize_for_parallel_processing()
@@ -582,7 +605,16 @@ class T3(nn.Module):
                 return_dict=True,
             )
 
-            # Update unified KV cache
+            # Update unified KV cache with debug logging
+            logger.debug(f"Step {step}: Updating KV cache with output past_key_values")
+            if hasattr(output, 'past_key_values') and output.past_key_values is not None:
+                if isinstance(output.past_key_values, DynamicCache):
+                    logger.debug(f"Step {step}: DynamicCache with {len(output.past_key_values.key_cache)} layers")
+                    for i, key_tensor in enumerate(output.past_key_values.key_cache):
+                        if key_tensor is not None:
+                            logger.debug(f"Step {step}: Layer {i} key tensor shape: {key_tensor.shape}")
+                else:
+                    logger.debug(f"Step {step}: Legacy cache format with {len(output.past_key_values)} layers")
             batch_state.kv_cache.update_unified_cache(output.past_key_values)
 
             # Process logits for all sequences in parallel
@@ -591,12 +623,16 @@ class T3(nn.Module):
             # Apply CFG if enabled
             if cfg_weight > 0.0:
                 # Split conditional and unconditional logits
+                logger.debug(f"Step {step}: CFG enabled, splitting logits from shape {logits_step.shape}")
                 cond_logits = logits_step[:active_batch_size]      # First half
                 uncond_logits = logits_step[active_batch_size:]    # Second half
+                logger.debug(f"Step {step}: CFG split - cond: {cond_logits.shape}, uncond: {uncond_logits.shape}")
                 cfg_tensor = torch.as_tensor(cfg_weight, device=cond_logits.device, dtype=cond_logits.dtype)
                 batch_logits = cond_logits + cfg_tensor * (cond_logits - uncond_logits)
+                logger.debug(f"Step {step}: CFG result shape: {batch_logits.shape}")
             else:
                 batch_logits = logits_step
+                logger.debug(f"Step {step}: No CFG, using direct logits with shape: {batch_logits.shape}")
 
             # Apply logits processing in parallel
             current_tokens_batch = batch_state.get_unified_active_tokens()
