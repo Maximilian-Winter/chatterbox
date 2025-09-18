@@ -350,15 +350,12 @@ class ChatterboxTTS:
         # Expand conditioning for batch size (create contiguous tensors)
         # Handle emotion_adv expansion based on its actual dimensions
         emotion_adv_expanded = self.conds.t3.emotion_adv
-        print(f"DEBUG: emotion_adv original shape: {emotion_adv_expanded.shape}, dim: {emotion_adv_expanded.dim()}, target batch size: {len(texts)}")
         if emotion_adv_expanded.dim() == 2:
             # [orig_batch, features] -> [new_batch, features]
             emotion_adv_expanded = emotion_adv_expanded.expand(len(texts), -1)
-            print(f"DEBUG: emotion_adv expanded (2D): {emotion_adv_expanded.shape}")
         elif emotion_adv_expanded.dim() == 3:
             # [orig_batch, seq, features] -> [new_batch, seq, features]
             emotion_adv_expanded = emotion_adv_expanded.expand(len(texts), -1, -1)
-            print(f"DEBUG: emotion_adv expanded (3D): {emotion_adv_expanded.shape}")
         # else: keep as-is for other dimensions
 
         batch_conds = T3Cond(

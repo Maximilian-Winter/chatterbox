@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cat:*)",
       "Bash(python:*)",
-      "Bash(E:DaoCraft.venvScriptspython.exe benchmark_optimized_batch.py)"
+      "Bash(E:DaoCraft.venvScriptspython.exe benchmark_optimized_batch.py)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []
