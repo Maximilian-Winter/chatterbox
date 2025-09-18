@@ -95,7 +95,11 @@ class T3(nn.Module):
         cond_emb = self.prepare_conditioning(t3_cond)  # (B, len_cond, dim)
         text_emb = self.text_emb(text_tokens)  # (B, len_text, dim)
         if cfg_weight > 0.0:
-            text_emb[1].zero_()  # CFG uncond
+            # Handle CFG - zero out unconditional sequences
+            # In CFG mode, sequences come in pairs: [cond1, uncond1, cond2, uncond2, ...]
+            batch_size = text_emb.size(0)
+            for i in range(1, batch_size, 2):  # Zero out every second sequence (unconditional)
+                text_emb[i].zero_()
 
         speech_emb = self.speech_emb(speech_tokens)  # (B, len_speech, dim)
         if self.hp.input_pos_emb == "learned":
@@ -552,7 +556,7 @@ class T3(nn.Module):
 
             if self.hp.input_pos_emb == "learned":
                 # Apply position embeddings efficiently
-                pos_embeds = self.speech_pos_emb.get_fixed_embedding(step + 1).unsqueeze(0).expand(active_batch_size, -1, -1)
+                pos_embeds = self.speech_pos_emb.get_fixed_embedding(step + 1)
                 token_embeds = token_embeds + pos_embeds
 
             # Handle CFG by duplicating embeddings
@@ -897,7 +901,7 @@ class T3(nn.Module):
             past_key_values=None,
             use_cache=True,
             output_attentions=False,
-            output_hidden_states=False,
+            output_hidden_states=True,
             return_dict=True,
         )
 
@@ -916,7 +920,7 @@ class T3(nn.Module):
         token_embeds = self.speech_emb(current_tokens)
 
         if self.hp.input_pos_emb == "learned":
-            pos_embeds = self.speech_pos_emb.get_fixed_embedding(step + 1).unsqueeze(0).expand(active_batch_size, -1, -1)
+            pos_embeds = self.speech_pos_emb.get_fixed_embedding(step + 1)
             token_embeds = token_embeds + pos_embeds
 
         # Handle CFG
@@ -925,13 +929,15 @@ class T3(nn.Module):
 
         # Get cached key-values
         past_key_values = batch_state.kv_cache.get_unified_past_key_values()
+        # Temporarily disable cache for testing
+        past_key_values = None
 
         # Forward pass
         output = self.patched_model(
             inputs_embeds=token_embeds,
             past_key_values=past_key_values,
             output_attentions=False,
-            output_hidden_states=False,
+            output_hidden_states=True,
             return_dict=True,
         )
 

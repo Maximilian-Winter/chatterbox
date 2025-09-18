@@ -267,8 +267,17 @@ class S3Token2Mel(torch.nn.Module):
                 if torch.is_tensor(ref_dict[rk]):
                     ref_dict[rk] = ref_dict[rk].to(self.device)
 
-            # Ensure ref_dict tensors match batch size
-            ref_dict = self._broadcast_ref_dict_to_batch(ref_dict, speech_tokens.shape[0])
+            # Ensure ref_dict tensors match batch size only if needed
+            batch_size = speech_tokens.shape[0]
+            # Check if broadcasting is needed
+            needs_broadcasting = False
+            for key, value in ref_dict.items():
+                if torch.is_tensor(value) and value.shape[0] != batch_size and value.shape[0] == 1:
+                    needs_broadcasting = True
+                    break
+
+            if needs_broadcasting and batch_size > 1:
+                ref_dict = self._broadcast_ref_dict_to_batch(ref_dict, batch_size)
 
         if len(speech_tokens.shape) == 1:
             speech_tokens = speech_tokens.unsqueeze(0)

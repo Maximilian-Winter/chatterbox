@@ -143,13 +143,28 @@ class MaskedDiffWithXvec(torch.nn.Module):
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
-        # concat text and prompt_text - handle batch dimension mismatch
+        # concat text and prompt_text - handle batch dimension mismatch carefully
         token_len1, token_len2 = prompt_token.shape[1], token.shape[1]
 
-        if prompt_token.shape[0] != token.shape[0]:
+        # Only expand if prompt_token has batch_size=1 and token has larger batch_size
+        if prompt_token.shape[0] == 1 and token.shape[0] > 1:
             # Broadcast prompt_token to match token batch size
             prompt_token = prompt_token.expand(token.shape[0], -1)
-            prompt_token_len = prompt_token_len.expand(token.shape[0])
+            # Handle prompt_token_len expansion safely
+            if isinstance(prompt_token_len, torch.Tensor):
+                if prompt_token_len.numel() == 1:
+                    prompt_token_len = prompt_token_len.expand(token.shape[0])
+                elif len(prompt_token_len.shape) == 0:
+                    prompt_token_len = prompt_token_len.unsqueeze(0).expand(token.shape[0])
+            else:
+                # Handle case where prompt_token_len is a scalar
+                prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
+        elif prompt_token.shape[0] != token.shape[0]:
+            # Mismatch that we can't handle - fall back to original behavior for single inference
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
+            # For single inference case, this might be normal - skip batch processing logic
 
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
@@ -273,11 +288,23 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
 
-        # concat text and prompt_text - handle batch dimension mismatch
-        if prompt_token.shape[0] != token.shape[0]:
+        # concat text and prompt_text - handle batch dimension mismatch carefully
+        # Only expand if prompt_token has batch_size=1 and token has larger batch_size
+        if prompt_token.shape[0] == 1 and token.shape[0] > 1:
             # Broadcast prompt_token to match token batch size
             prompt_token = prompt_token.expand(token.shape[0], -1)
-            prompt_token_len = prompt_token_len.expand(token.shape[0])
+            # Handle prompt_token_len expansion safely
+            if isinstance(prompt_token_len, torch.Tensor):
+                if prompt_token_len.numel() == 1:
+                    prompt_token_len = prompt_token_len.expand(token.shape[0])
+                elif len(prompt_token_len.shape) == 0:
+                    prompt_token_len = prompt_token_len.unsqueeze(0).expand(token.shape[0])
+            else:
+                # Handle case where prompt_token_len is a scalar
+                prompt_token_len = torch.tensor([prompt_token_len] * token.shape[0], device=token.device)
+        elif prompt_token.shape[0] != token.shape[0]:
+            # Mismatch that we can't handle - this might indicate a problem
+            logger.warning(f"Batch dimension mismatch: prompt_token.shape={prompt_token.shape}, token.shape={token.shape}")
 
         token, token_len = torch.concat([prompt_token, token], dim=1), prompt_token_len + token_len
         mask = (~make_pad_mask(token_len)).unsqueeze(-1).to(embedding)
