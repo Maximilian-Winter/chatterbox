@@ -19,6 +19,7 @@ from .modules.t3_config import T3Config
 from .llama_configs import LLAMA_CONFIGS
 from .inference.t3_hf_backend import T3HuggingfaceBackend
 from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
+from .batch_state import BatchGenerationState, BatchKVCache
 from ..utils import AttrDict
 
 
@@ -392,3 +393,246 @@ class T3(nn.Module):
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
         return predicted_tokens
+
+    @torch.inference_mode()
+    def batch_inference(
+        self,
+        batch_text_tokens: List[Tensor],
+        batch_t3_conds: List[T3Cond],
+        max_new_tokens=1000,
+        temperature=0.8,
+        top_p=0.95,
+        min_p=0.05,
+        repetition_penalty=1.2,
+        cfg_weight=0.5,
+        stop_on_eos=True,
+    ):
+        """
+        Perform parallel inference for multiple text sequences.
+
+        Args:
+            batch_text_tokens: List of text token tensors, each shape (1, seq_len) or (2, seq_len) for CFG
+            batch_t3_conds: List of T3Cond objects for each sequence
+            max_new_tokens: Maximum tokens to generate per sequence
+            temperature: Sampling temperature
+            top_p: Top-p (nucleus) sampling parameter
+            min_p: Minimum probability threshold
+            repetition_penalty: Repetition penalty factor
+            cfg_weight: Classifier-free guidance weight
+            stop_on_eos: Whether to stop on EOS token
+
+        Returns:
+            List of generated speech token tensors
+        """
+        batch_size = len(batch_text_tokens)
+        device = self.device
+
+        if batch_size == 0:
+            return []
+
+        # Validate inputs
+        for text_tokens in batch_text_tokens:
+            _ensure_BOT_EOT(text_tokens, self.hp)
+
+        # Initialize batch generation state
+        batch_state = BatchGenerationState(
+            batch_size=batch_size,
+            max_tokens=max_new_tokens,
+            device=device,
+            start_token=self.hp.start_speech_token,
+            stop_token=self.hp.stop_speech_token,
+            model_config={
+                'num_hidden_layers': self.cfg.num_hidden_layers,
+                'num_attention_heads': self.cfg.num_attention_heads,
+                'hidden_size': self.cfg.hidden_size,
+            }
+        )
+
+        # Prepare conditioning for all sequences
+        batch_cond_embeds = []
+        for i in range(batch_size):
+            text_tokens = batch_text_tokens[i].to(device)
+            t3_cond = batch_t3_conds[i]
+
+            # Prepare initial speech tokens (start token)
+            initial_speech_tokens = self.hp.start_speech_token * torch.ones((text_tokens.size(0), 1),
+                                                                           device=device, dtype=torch.long)
+
+            # Prepare input embeddings for this sequence
+            embeds, len_cond = self.prepare_input_embeds(
+                t3_cond=t3_cond,
+                text_tokens=text_tokens,
+                speech_tokens=initial_speech_tokens,
+                cfg_weight=cfg_weight,
+            )
+            batch_cond_embeds.append(embeds)
+
+        # Set up model for batch generation
+        if not self.compiled:
+            # Initialize alignment analyzers for multilingual if needed
+            alignment_analyzers = []
+            if self.hp.is_multilingual:
+                for i, text_tokens in enumerate(batch_text_tokens):
+                    len_cond = batch_cond_embeds[i].size(1) - text_tokens.size(1) - 1  # Approximate conditioning length
+                    analyzer = AlignmentStreamAnalyzer(
+                        self.tfmr,
+                        None,
+                        text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
+                        alignment_layer_idx=9,
+                        eos_idx=self.hp.stop_speech_token,
+                    )
+                    alignment_analyzers.append(analyzer)
+
+            # Create patched model for first sequence (reuse for others)
+            patched_model = T3HuggingfaceBackend(
+                config=self.cfg,
+                llama=self.tfmr,
+                speech_enc=self.speech_emb,
+                speech_head=self.speech_head,
+                alignment_stream_analyzer=alignment_analyzers[0] if alignment_analyzers else None,
+            )
+            self.patched_model = patched_model
+            self.compiled = True
+
+        # Initialize logits processors
+        top_p_warper = TopPLogitsWarper(top_p=top_p)
+        min_p_warper = MinPLogitsWarper(min_p=min_p)
+        repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=float(repetition_penalty))
+
+        # Prepare initial BOS embeddings for all sequences
+        bos_token = torch.tensor([[self.hp.start_speech_token]], dtype=torch.long, device=device)
+        bos_embed = self.speech_emb(bos_token)
+        bos_embed = bos_embed + self.speech_pos_emb.get_fixed_embedding(0)
+
+        # Initial forward pass for all sequences
+        all_past_key_values = []
+        for i in range(batch_size):
+            # For CFG, duplicate the BOS embedding
+            if cfg_weight > 0.0:
+                seq_bos_embed = torch.cat([bos_embed, bos_embed])
+            else:
+                seq_bos_embed = bos_embed
+
+            # Combine conditioning and BOS for this sequence
+            inputs_embeds = torch.cat([batch_cond_embeds[i], seq_bos_embed], dim=1)
+
+            # Forward pass
+            output = self.patched_model(
+                inputs_embeds=inputs_embeds,
+                past_key_values=None,
+                use_cache=True,
+                output_attentions=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            all_past_key_values.append(output.past_key_values)
+
+        # Generation loop
+        for step in tqdm(range(max_new_tokens), desc="Batch Sampling", dynamic_ncols=True):
+            if not batch_state.has_active_sequences():
+                break
+
+            active_sequences = batch_state.active_sequences
+            batch_logits_list = []
+
+            # Forward pass for all active sequences
+            for seq_idx, seq_id in enumerate(active_sequences):
+                past_kv = all_past_key_values[seq_id]
+
+                # Get current token for this sequence
+                current_tokens = batch_state.sequences[seq_id].generated_tokens[:, -1:]
+
+                # Get embedding for current token
+                token_embed = self.speech_emb(current_tokens)
+                if self.hp.input_pos_emb == "learned":
+                    token_embed = token_embed + self.speech_pos_emb.get_fixed_embedding(step + 1)
+
+                # For CFG, duplicate the token embedding
+                if cfg_weight > 0.0:
+                    token_embed = torch.cat([token_embed, token_embed])
+
+                # Forward pass
+                output = self.patched_model(
+                    inputs_embeds=token_embed,
+                    past_key_values=past_kv,
+                    output_attentions=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+
+                # Update past key values
+                all_past_key_values[seq_id] = output.past_key_values
+
+                # Get logits and apply CFG
+                logits_step = output.logits[:, -1, :]
+
+                if cfg_weight > 0.0:
+                    cond = logits_step[0:1, :]
+                    uncond = logits_step[1:2, :]
+                    cfg_tensor = torch.as_tensor(cfg_weight, device=cond.device, dtype=cond.dtype)
+                    logits = cond + cfg_tensor * (cond - uncond)
+                else:
+                    logits = logits_step
+
+                # Apply alignment stream analyzer if available
+                if hasattr(self.patched_model, 'alignment_stream_analyzer') and self.patched_model.alignment_stream_analyzer is not None:
+                    if logits.dim() == 1:
+                        logits = logits.unsqueeze(0)
+
+                    # Get last generated token for repetition tracking
+                    generated_tokens = batch_state.sequences[seq_id].generated_tokens
+                    last_token = generated_tokens[0, -1].item() if generated_tokens.size(1) > 0 else None
+                    logits = self.patched_model.alignment_stream_analyzer.step(logits, next_token=last_token)
+
+                batch_logits_list.append(logits)
+
+            # Process logits for all active sequences
+            if batch_logits_list:
+                # Stack logits from all active sequences
+                batch_logits = torch.cat(batch_logits_list, dim=0)
+
+                # Apply repetition penalty for all sequences
+                current_tokens_batch = batch_state.get_all_generated_tokens()
+                if current_tokens_batch.size(0) > 0:
+                    batch_logits = repetition_penalty_processor(current_tokens_batch, batch_logits)
+
+                # Apply temperature scaling
+                if temperature != 1.0:
+                    batch_logits = batch_logits / temperature
+
+                # Apply min_p and top_p filtering
+                batch_logits = min_p_warper(current_tokens_batch, batch_logits)
+                batch_logits = top_p_warper(current_tokens_batch, batch_logits)
+
+                # Sample next tokens
+                probs = torch.softmax(batch_logits, dim=-1)
+                next_tokens = torch.multinomial(probs, num_samples=1)  # (active_batch_size, 1)
+
+                # Update batch state
+                batch_state.update_with_new_tokens(next_tokens)
+
+                # Check for early stopping
+                if stop_on_eos and all(
+                    self.hp.stop_speech_token in batch_state.sequences[seq_id].generated_tokens[0]
+                    for seq_id in range(batch_size)
+                    if batch_state.sequences[seq_id].is_completed
+                ):
+                    logger.info(f"✅ All sequences completed at step {step+1}")
+                    break
+
+        # Extract results
+        results = batch_state.get_results()
+
+        # Remove start tokens and return only generated speech tokens
+        final_results = []
+        for result in results:
+            if result.size(1) > 0:
+                # Remove start token if present
+                if result.size(1) > 0 and result[0, 0].item() == self.hp.start_speech_token:
+                    result = result[:, 1:]
+                final_results.append(result.squeeze(0))  # Remove batch dimension
+            else:
+                # Empty result
+                final_results.append(torch.empty(0, device=device, dtype=torch.long))
+
+        return final_results

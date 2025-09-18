@@ -394,36 +394,42 @@ class ChatterboxMultilingualTTS:
 
         results = []
 
-        # Process each text individually for T3 inference (due to generation loop constraints)
-        # but batch the S3Gen inference where possible
-        all_speech_tokens = []
+        # Use true batch inference for T3 model
+        batch_t3_conds = []
+        for i in range(len(texts)):
+            individual_conds = T3Cond(
+                speaker_emb=batch_conds.speaker_emb[i:i+1],
+                cond_prompt_speech_tokens=batch_conds.cond_prompt_speech_tokens[i:i+1] if batch_conds.cond_prompt_speech_tokens is not None else None,
+                emotion_adv=batch_conds.emotion_adv[i:i+1],
+            ).to(device=self.device)
+            batch_t3_conds.append(individual_conds)
 
         with torch.inference_mode():
-            for i, text_tokens in enumerate(padded_tokens):
-                # Individual T3 inference per text (generation is inherently sequential)
-                individual_conds = T3Cond(
-                    speaker_emb=batch_conds.speaker_emb[i:i+1],
-                    cond_prompt_speech_tokens=batch_conds.cond_prompt_speech_tokens[i:i+1] if batch_conds.cond_prompt_speech_tokens is not None else None,
-                    emotion_adv=batch_conds.emotion_adv[i:i+1],
-                ).to(device=self.device)
+            # True batch T3 inference - process all sequences in parallel
+            all_speech_tokens = self.t3.batch_inference(
+                batch_text_tokens=padded_tokens,
+                batch_t3_conds=batch_t3_conds,
+                max_new_tokens=1000,  # TODO: use the value in config
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                repetition_penalty=repetition_penalty,
+                min_p=min_p,
+                top_p=top_p,
+            )
 
-                speech_tokens = self.t3.inference(
-                    t3_cond=individual_conds,
-                    text_tokens=text_tokens,
-                    max_new_tokens=1000,  # TODO: use the value in config
-                    temperature=temperature,
-                    cfg_weight=cfg_weight,
-                    repetition_penalty=repetition_penalty,
-                    min_p=min_p,
-                    top_p=top_p,
-                )
-                # Extract only the conditional batch.
-                speech_tokens = speech_tokens[0]
-                speech_tokens = drop_invalid_tokens(speech_tokens)
-                all_speech_tokens.append(speech_tokens.to(self.device))
-
-            # Process S3Gen inference for each (due to current batch_size=1 constraint)
+            # Post-process speech tokens and run S3Gen inference
             for speech_tokens in all_speech_tokens:
+                # Apply post-processing - ensure proper shape for drop_invalid_tokens
+                if speech_tokens.dim() == 1:
+                    speech_tokens = speech_tokens.unsqueeze(0)  # Add batch dim
+                speech_tokens = drop_invalid_tokens(speech_tokens)
+
+                # Ensure proper shape for S3Gen (expects batch dimension)
+                if speech_tokens.dim() == 1:
+                    speech_tokens = speech_tokens.unsqueeze(0)
+                speech_tokens = speech_tokens.to(self.device)
+
+                # S3Gen inference (still individual due to constraints)
                 wav, _ = self.s3gen.inference(
                     speech_tokens=speech_tokens,
                     ref_dict=self.conds.gen,
