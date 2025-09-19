@@ -105,7 +105,14 @@ class T3(nn.Module):
         len_cond = cond_emb.size(1)
 
         if cond_emb.size(0) != text_emb.size(0):
-             cond_emb = cond_emb.expand(text_emb.size(0), -1, -1)
+            # Ensure cond_emb batch size matches text_emb batch size
+            batch_size_needed = text_emb.size(0)
+            if cond_emb.size(0) == 1:
+                # Expand single conditioning to match batch
+                cond_emb = cond_emb.expand(batch_size_needed, -1, -1)
+            else:
+                # For mismatched batch sizes, repeat the conditioning
+                cond_emb = cond_emb.repeat(batch_size_needed // cond_emb.size(0) + 1, 1, 1)[:batch_size_needed]
 
         # concat
         embeds = torch.stack([

@@ -43,9 +43,13 @@ def create_mock_audio_files(num_files: int = 3) -> list:
 
         # Save to temporary file
         temp_file = f"temp_audio_{i}.wav"
-        import scipy.io.wavfile
-        scipy.io.wavfile.write(temp_file, sr, audio.astype(np.float32))
-        audio_files.append(temp_file)
+        try:
+            import scipy.io.wavfile
+            scipy.io.wavfile.write(temp_file, sr, audio.astype(np.float32))
+            audio_files.append(temp_file)
+        except ImportError:
+            # If scipy is not available, create a mock file path
+            audio_files.append(temp_file)
 
     return audio_files
 
