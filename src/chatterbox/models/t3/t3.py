@@ -386,102 +386,180 @@ class T3(nn.Module):
         batch_size = len(t3_cond_batch)
         device = self.device
 
-        # 1. Prepare inputs (Padding and Batching)
-        max_text_len = max(t.shape[-1] for t in text_tokens_batch)
-        padded_text_tokens = torch.stack([
-            torch.nn.functional.pad(t, (0, max_text_len - t.shape[-1]), value=self.hp.stop_text_token)
-            for t in text_tokens_batch
-        ]).to(dtype=torch.long, device=device)
+        # Validate and prepare text tokens
+        for tokens in text_tokens_batch:
+            _ensure_BOT_EOT(tokens, self.hp)
 
-        batched_t3_cond = T3Cond(
-            speaker_emb=torch.cat([c.speaker_emb for c in t3_cond_batch], dim=0),
-            cond_prompt_speech_tokens=torch.cat([c.cond_prompt_speech_tokens for c in t3_cond_batch if c.cond_prompt_speech_tokens is not None], dim=0) if any(c.cond_prompt_speech_tokens is not None for c in t3_cond_batch) else None,
-            emotion_adv=torch.cat([c.emotion_adv for c in t3_cond_batch], dim=0)
-        ).to(device=device)
+        # Pad text tokens to same length
+        max_text_len = max(tokens.shape[-1] if tokens.dim() > 1 else tokens.shape[0]
+                           for tokens in text_tokens_batch)
 
-        # Prepare for CFG
-        cfg_batch_size = batch_size * 2
-        padded_text_tokens_cfg = padded_text_tokens.repeat(2, 1)
-        # Create a dummy T3Cond for CFG expansion
-        batched_t3_cond_cfg = T3Cond(
-            speaker_emb=batched_t3_cond.speaker_emb.repeat(2, 1, 1),
-            cond_prompt_speech_tokens=batched_t3_cond.cond_prompt_speech_tokens.repeat(2, 1) if batched_t3_cond.cond_prompt_speech_tokens is not None else None,
-            emotion_adv=batched_t3_cond.emotion_adv.repeat(2, 1, 1)
-        ).to(device=device)
+        padded_text_tokens = []
+        text_masks = []
 
+        for tokens in text_tokens_batch:
+            tokens = torch.atleast_2d(tokens).to(dtype=torch.long, device=device)
+            curr_len = tokens.shape[-1]
+
+            if curr_len < max_text_len:
+                pad_len = max_text_len - curr_len
+                padded = F.pad(tokens, (0, pad_len), value=self.hp.stop_text_token)
+                mask = torch.cat([torch.ones(curr_len), torch.zeros(pad_len)]).to(device)
+            else:
+                padded = tokens
+                mask = torch.ones(curr_len).to(device)
+
+            padded_text_tokens.append(padded)
+            text_masks.append(mask)
+
+        # Prepare initial speech tokens
         if initial_speech_tokens_batch is None:
-            initial_speech_tokens = torch.full((batch_size, 1), self.hp.start_speech_token, device=device, dtype=torch.long)
-        else:
-            initial_speech_tokens = torch.stack(initial_speech_tokens_batch).to(device)
-        initial_speech_tokens_cfg = initial_speech_tokens.repeat(2, 1)
+            initial_speech_tokens_batch = [
+                torch.tensor([[self.hp.start_speech_token]], device=device, dtype=torch.long)
+                for _ in range(batch_size)
+            ]
 
-        # 2. Get input embeddings
-        embeds, len_cond = self.prepare_input_embeds(
-            t3_cond=batched_t3_cond_cfg,
-            text_tokens=padded_text_tokens_cfg,
-            speech_tokens=initial_speech_tokens_cfg,
-            cfg_weight=1.0  # We do CFG manually later
-        )
+        # Prepare embeddings for each sequence with CFG
+        all_embeds = []
+        all_lens_cond = []
 
-        # 3. Initial forward pass
+        for i in range(batch_size):
+            # Duplicate for CFG
+            text_tokens_cfg = torch.cat([padded_text_tokens[i], padded_text_tokens[i]], dim=0)
+            speech_tokens_cfg = torch.cat([initial_speech_tokens_batch[i], initial_speech_tokens_batch[i]], dim=0)
+
+            embeds, len_cond = self.prepare_input_embeds(
+                t3_cond=t3_cond_batch[i],
+                text_tokens=text_tokens_cfg,
+                speech_tokens=speech_tokens_cfg,
+                cfg_weight=cfg_weights[i],
+            )
+            all_embeds.append(embeds)
+            all_lens_cond.append(len_cond)
+
+        # Pad embeddings to same length and stack
+        max_embed_len = max(e.shape[1] for e in all_embeds)
+        padded_embeds = []
+
+        for embed in all_embeds:
+            if embed.shape[1] < max_embed_len:
+                pad_len = max_embed_len - embed.shape[1]
+                padded = F.pad(embed, (0, 0, 0, pad_len))
+            else:
+                padded = embed
+            padded_embeds.append(padded)
+
+        # Stack with CFG dimension preserved
+        batch_embeds = torch.cat(padded_embeds, dim=0)  # [B*2, max_len, dim] for CFG
+
+        # Add BOS embeddings
+        bos_tokens = torch.full((batch_size * 2, 1), self.hp.start_speech_token,
+                                dtype=torch.long, device=device)
+        bos_embeds = self.speech_emb(bos_tokens)
+        if self.hp.input_pos_emb == "learned":
+            bos_embeds = bos_embeds + self.speech_pos_emb.get_fixed_embedding(0)
+
+        inputs_embeds = torch.cat([batch_embeds, bos_embeds], dim=1)
+
+        # Initial forward pass
         output = self.tfmr(
-            inputs_embeds=embeds,
+            inputs_embeds=inputs_embeds,
             use_cache=True,
             output_hidden_states=True,
             return_dict=True,
         )
+
         past_key_values = output.past_key_values
 
-        # 4. Generation loop (vectorized)
-        generated_tokens = torch.full((batch_size, 0), -1, dtype=torch.long, device=device)
+        # Generation loop
+        generated_tokens = [[] for _ in range(batch_size)]
         active_sequences = torch.ones(batch_size, dtype=torch.bool, device=device)
+
         max_tokens = max_new_tokens or self.hp.max_speech_tokens
 
-        temperatures_t = torch.tensor(temperatures, device=device, dtype=torch.float32).unsqueeze(1)
-        cfg_weights_t = torch.tensor(cfg_weights, device=device, dtype=torch.float32).unsqueeze(1)
-        repetition_penalties_t = torch.tensor(repetition_penalties, device=device, dtype=torch.float32)
-
-        next_tokens = initial_speech_tokens
+        # Initialize processors
+        top_p_warpers = [TopPLogitsWarper(top_p=p) for p in top_ps]
+        min_p_warpers = [MinPLogitsWarper(min_p=p) for p in min_ps]
+        rep_processors = [RepetitionPenaltyLogitsProcessor(penalty=float(p))
+                          for p in repetition_penalties]
 
         for step in range(max_tokens):
-            next_tokens_embeds = self.speech_emb(next_tokens.repeat(2, 1))
-            if self.hp.input_pos_emb == "learned":
-                next_tokens_embeds += self.speech_pos_emb.get_fixed_embedding(step)
+            # Get logits for all sequences
+            hidden_states = output.hidden_states[-1]  # [B*2, 1, dim]
+            logits = self.speech_head(hidden_states)[:, -1, :]  # [B*2, vocab]
 
+            # Process each sequence
+            next_tokens = []
+
+            for i in range(batch_size):
+                if not active_sequences[i]:
+                    next_tokens.append(torch.tensor([self.hp.stop_speech_token], device=device))
+                    continue
+
+                # CFG combination
+                cond_logits = logits[i * 2]
+                uncond_logits = logits[i * 2 + 1]
+                cfg_weight = torch.tensor(cfg_weights[i], device=device, dtype=logits.dtype)
+                combined_logits = cond_logits + cfg_weight * (cond_logits - uncond_logits)
+                combined_logits = combined_logits.unsqueeze(0)  # [1, vocab]
+
+                # Apply repetition penalty
+                if generated_tokens[i]:
+                    gen_ids = torch.tensor(generated_tokens[i], device=device).unsqueeze(0)
+                    combined_logits = rep_processors[i](gen_ids, combined_logits)
+
+                # Temperature scaling
+                if temperatures[i] != 1.0:
+                    combined_logits = combined_logits / temperatures[i]
+
+                # Apply filtering
+                dummy_ids = torch.zeros((1, 1), dtype=torch.long, device=device)
+                combined_logits = min_p_warpers[i](dummy_ids, combined_logits)
+                combined_logits = top_p_warpers[i](dummy_ids, combined_logits)
+
+                # Sample
+                probs = F.softmax(combined_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).squeeze()
+                next_tokens.append(next_token)
+
+                # Check for EOS
+                if next_token == self.hp.stop_speech_token:
+                    active_sequences[i] = False
+                else:
+                    generated_tokens[i].append(next_token.item())
+
+            # Early stopping if all sequences are done
+            if not active_sequences.any():
+                break
+
+            # Prepare next embeddings (with CFG duplication)
+            next_embeds = []
+            for i, token in enumerate(next_tokens):
+                token_embed = self.speech_emb(token.unsqueeze(0).unsqueeze(0))
+                if self.hp.input_pos_emb == "learned":
+                    token_embed = token_embed + self.speech_pos_emb.get_fixed_embedding(step + 1)
+                # Duplicate for CFG
+                next_embeds.append(token_embed)
+                next_embeds.append(token_embed)
+
+            next_embeds = torch.cat(next_embeds, dim=0)  # [B*2, 1, dim]
+
+            # Forward pass with cache
             output = self.tfmr(
-                inputs_embeds=next_tokens_embeds,
+                inputs_embeds=next_embeds,
                 past_key_values=past_key_values,
                 use_cache=True,
                 output_hidden_states=True,
                 return_dict=True,
             )
             past_key_values = output.past_key_values
-            logits = self.speech_head(output.hidden_states[-1][:, -1, :])
 
-            cond_logits, uncond_logits = logits.chunk(2, dim=0)
-            combined_logits = cond_logits + cfg_weights_t * (cond_logits - uncond_logits)
+        # Convert generated tokens to tensors
+        results = []
+        for tokens in generated_tokens:
+            if tokens:
+                results.append(torch.tensor(tokens, device=device))
+            else:
+                results.append(torch.tensor([self.hp.stop_speech_token], device=device))
 
-            if torch.any(repetition_penalties_t != 1.0):
-                if generated_tokens.shape[1] > 0:
-                    combined_logits.scatter_add_(1, generated_tokens, -torch.log(repetition_penalties_t).unsqueeze(1) * (combined_logits > 0))
-
-            combined_logits = combined_logits / temperatures_t
-
-            # For simplicity, using top-p, min-p from the first item if they are heterogeneous
-            # A fully vectorized version would require a batched implementation of the warpers
-            top_p_warper = TopPLogitsWarper(top_p=top_ps[0])
-            min_p_warper = MinPLogitsWarper(min_p=min_ps[0])
-            combined_logits = min_p_warper(generated_tokens, combined_logits)
-            combined_logits = top_p_warper(generated_tokens, combined_logits)
-
-            probs = torch.softmax(combined_logits, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1)
-
-            generated_tokens = torch.cat([generated_tokens, next_tokens], dim=1)
-
-            active_sequences = active_sequences & (next_tokens.squeeze(-1) != self.hp.stop_speech_token)
-            if not active_sequences.any():
-                break
-
-        results = [row[row != self.hp.stop_speech_token] for row in generated_tokens]
         return results
