@@ -461,6 +461,18 @@ class HiFTGenerator(nn.Module):
 
     @torch.inference_mode()
     def inference(self, speech_feat: torch.Tensor, cache_source: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
+        # Handle edge cases with very small or empty inputs
+        # This can happen when speech tokens are very short or empty
+        original_time_dim = speech_feat.shape[-1]
+
+        # Handle completely empty input
+        if original_time_dim == 0:
+            # Return minimal output with proper shape
+            batch_size = speech_feat.shape[0]
+            empty_speech = torch.zeros(batch_size, 1000, device=speech_feat.device, dtype=speech_feat.dtype)
+            empty_source = torch.zeros(batch_size, 1, 0, device=speech_feat.device, dtype=speech_feat.dtype)
+            return empty_speech, empty_source
+
         # mel->f0
         f0 = self.f0_predictor(speech_feat)
         # f0->source
