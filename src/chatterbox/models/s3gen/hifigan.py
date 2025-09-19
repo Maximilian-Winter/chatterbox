@@ -394,6 +394,13 @@ class HiFTGenerator(nn.Module):
             l.remove_weight_norm()
 
     def _stft(self, x):
+        # Handle edge case where input is too small for STFT padding
+        min_length = self.istft_params["n_fft"]
+        if x.size(-1) < min_length:
+            # Pad input to minimum required length
+            pad_length = min_length - x.size(-1)
+            x = torch.nn.functional.pad(x, (0, pad_length), mode='constant', value=0)
+
         spec = torch.stft(
             x,
             self.istft_params["n_fft"], self.istft_params["hop_len"], self.istft_params["n_fft"], window=self.stft_window.to(x.device),
@@ -410,8 +417,28 @@ class HiFTGenerator(nn.Module):
         return inverse_transform
 
     def decode(self, x: torch.Tensor, s: torch.Tensor = torch.zeros(1, 1, 0)) -> torch.Tensor:
+        # Handle edge case with very small or empty source tensors
+        if s.size(-1) == 0:
+            # Create minimal source tensor for empty input
+            batch_size = s.size(0)
+            s = torch.zeros(batch_size, 1, self.istft_params["n_fft"], device=s.device, dtype=s.dtype)
+
         s_stft_real, s_stft_imag = self._stft(s.squeeze(1))
         s_stft = torch.cat([s_stft_real, s_stft_imag], dim=1)
+
+        # Handle case where STFT output is too small for source_downs convolutions
+        # The largest kernel in source_downs can be quite large (e.g., 30)
+        # We need to ensure s_stft has sufficient time dimension
+        max_kernel_size = max([
+            getattr(layer, 'kernel_size')[0] if hasattr(getattr(layer, 'kernel_size'), '__len__')
+            else getattr(layer, 'kernel_size')
+            for layer in self.source_downs
+        ])
+
+        if s_stft.size(-1) < max_kernel_size:
+            # Pad STFT features to ensure compatibility with all conv layers
+            pad_size = max_kernel_size - s_stft.size(-1)
+            s_stft = torch.nn.functional.pad(s_stft, (0, pad_size), mode='replicate')
 
         x = self.conv_pre(x)
         for i in range(self.num_upsamples):
@@ -424,6 +451,14 @@ class HiFTGenerator(nn.Module):
             # fusion
             si = self.source_downs[i](s_stft)
             si = self.source_resblocks[i](si)
+
+            # Ensure si matches x's time dimension for fusion
+            if si.size(-1) != x.size(-1):
+                # Interpolate si to match x's time dimension
+                si = torch.nn.functional.interpolate(
+                    si, size=x.size(-1), mode='linear', align_corners=False
+                )
+
             x = x + si
 
             xs = None
@@ -472,6 +507,12 @@ class HiFTGenerator(nn.Module):
             empty_speech = torch.zeros(batch_size, 1000, device=speech_feat.device, dtype=speech_feat.dtype)
             empty_source = torch.zeros(batch_size, 1, 0, device=speech_feat.device, dtype=speech_feat.dtype)
             return empty_speech, empty_source
+
+        # Handle very small inputs (1-2 frames) by ensuring minimum processing size
+        if original_time_dim < 3:
+            # Pad to minimum size for stable processing
+            pad_size = 3 - original_time_dim
+            speech_feat = torch.nn.functional.pad(speech_feat, (0, pad_size), mode='replicate')
 
         # mel->f0
         f0 = self.f0_predictor(speech_feat)
