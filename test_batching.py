@@ -10,7 +10,7 @@ audio_paths = ["voice.wav", "voice.wav", "voice.wav"]
 outputs = tts.generate_batch(
     texts=texts,
     audio_prompt_paths=audio_paths,
-    max_batch_size=8
+    max_batch_size=4
 )
 
 for idx, audio in enumerate(outputs):

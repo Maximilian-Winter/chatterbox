@@ -1,4 +1,41 @@
 {
+  "Text Tokenization": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.0004955927530924479,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 2017.78576010263
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.0002713203430175781,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 7371.360281195079
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.0003208319346110026,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 12467.586821897448
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.0004944801330566406,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 16178.607521697204
+    },
+    {
+      "batch_size": 16,
+      "processing_time": 0.0008572737375895182,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 18663.816816538427
+    }
+  ],
   "Mock T3 Inference (Single)": [
     {
       "batch_size": 1,
