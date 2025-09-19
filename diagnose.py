@@ -161,12 +161,12 @@ class DiagnosticTTS(ChatterboxMultilingualTTS):
 
 
 def main():
-    print("Initializing ChatterboxTTS with diagnostics...")
+    print("Initializing ChatterboxMultilingualTTS with diagnostics...")
 
     # Monkey-patch the TTS class
     import chatterbox
-    original_tts = chatterbox.ChatterboxTTS
-    chatterbox.ChatterboxTTS = DiagnosticTTS
+    original_tts = chatterbox.ChatterboxMultilingualTTS
+    chatterbox.ChatterboxMultilingualTTS = DiagnosticTTS
 
     tts = DiagnosticTTS.from_pretrained("cuda")
 
