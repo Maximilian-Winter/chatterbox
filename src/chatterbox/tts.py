@@ -18,7 +18,6 @@ from .models.tokenizers import EnTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
-
 REPO_ID = "ResembleAI/chatterbox"
 
 
@@ -47,10 +46,10 @@ def punc_norm(text: str) -> str:
         ("—", "-"),
         ("–", "-"),
         (" ,", ","),
-        ("“", "\""),
-        ("”", "\""),
-        ("‘", "'"),
-        ("’", "'"),
+        (""", "\""),
+        (""", "\""),
+        ("'", "'"),
+        ("'", "'"),
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
@@ -111,13 +110,13 @@ class ChatterboxTTS:
     DEC_COND_LEN = 10 * S3GEN_SR
 
     def __init__(
-        self,
-        t3: T3,
-        s3gen: S3Gen,
-        ve: VoiceEncoder,
-        tokenizer: EnTokenizer,
-        device: str,
-        conds: Conditionals = None,
+            self,
+            t3: T3,
+            s3gen: S3Gen,
+            ve: VoiceEncoder,
+            tokenizer: EnTokenizer,
+            device: str,
+            conds: Conditionals = None,
     ):
         self.sr = S3GEN_SR  # sample rate of synthesized audio
         self.t3 = t3
@@ -174,7 +173,8 @@ class ChatterboxTTS:
             if not torch.backends.mps.is_built():
                 print("MPS not available because the current PyTorch install was not built with MPS enabled.")
             else:
-                print("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
+                print(
+                    "MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
             device = "cpu"
 
         for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
@@ -254,7 +254,7 @@ class ChatterboxTTS:
 
             if torch.cuda.is_available() and self.device != 'cpu':
                 try:
-                    free_mem = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)  # GB
+                    free_mem = torch.cuda.get_device_properties(self.device).total_memory / (1024 ** 3)  # GB
                     if estimated_mem < free_mem * 0.8 * 1024:  # Use 80% of available memory
                         return batch_size
                 except:
@@ -266,9 +266,9 @@ class ChatterboxTTS:
         return 1
 
     def prepare_conditionals_batch(
-        self,
-        wav_fpaths: List[str],
-        exaggerations: Union[float, List[float]] = 0.5
+            self,
+            wav_fpaths: List[str],
+            exaggerations: Union[float, List[float]] = 0.5
     ) -> List[Conditionals]:
         if isinstance(exaggerations, (int, float)):
             exaggerations = [float(exaggerations)] * len(wav_fpaths)
@@ -306,17 +306,17 @@ class ChatterboxTTS:
         return conditionals
 
     def generate_batch(
-        self,
-        texts: List[str],
-        audio_prompt_paths: Optional[List[str]] = None,
-        exaggerations: Union[float, List[float]] = 0.5,
-        cfg_weights: Union[float, List[float]] = 0.5,
-        temperatures: Union[float, List[float]] = 0.8,
-        repetition_penalties: Union[float, List[float]] = 1.2,
-        min_ps: Union[float, List[float]] = 0.05,
-        top_ps: Union[float, List[float]] = 1.0,
-        max_batch_size: int = 8,
-        return_intermediates: bool = False,
+            self,
+            texts: List[str],
+            audio_prompt_paths: Optional[List[str]] = None,
+            exaggerations: Union[float, List[float]] = 0.5,
+            cfg_weights: Union[float, List[float]] = 0.5,
+            temperatures: Union[float, List[float]] = 0.8,
+            repetition_penalties: Union[float, List[float]] = 1.2,
+            min_ps: Union[float, List[float]] = 0.05,
+            top_ps: Union[float, List[float]] = 1.0,
+            max_batch_size: int = 8,
+            return_intermediates: bool = False,
     ) -> List[torch.Tensor]:
         self._validate_batch_inputs(texts, audio_prompt_paths)
 
@@ -365,14 +365,14 @@ class ChatterboxTTS:
         return results
 
     def _process_sub_batch(
-        self,
-        texts: List[str],
-        conditionals: List[Conditionals],
-        cfg_weights: List[float],
-        temperatures: List[float],
-        repetition_penalties: List[float],
-        min_ps: List[float],
-        top_ps: List[float]
+            self,
+            texts: List[str],
+            conditionals: List[Conditionals],
+            cfg_weights: List[float],
+            temperatures: List[float],
+            repetition_penalties: List[float],
+            min_ps: List[float],
+            top_ps: List[float]
     ) -> List[torch.Tensor]:
         batch_size = len(texts)
 
@@ -422,23 +422,58 @@ class ChatterboxTTS:
 
                 for i, speech_tokens in enumerate(speech_tokens_batch):
                     try:
+                        # For CFG, take the first sequence
                         if cfg_weights[i] > 0.0 and speech_tokens.dim() > 1 and speech_tokens.shape[0] > 1:
                             speech_tokens = speech_tokens[0]
 
-                        speech_tokens = drop_invalid_tokens(speech_tokens)
-                        if isinstance(speech_tokens, list):
-                            speech_tokens = speech_tokens[0] if speech_tokens else torch.tensor([], device=self.device)
+                        # Ensure speech_tokens is 1D
+                        if speech_tokens.dim() > 1:
+                            speech_tokens = speech_tokens.squeeze(0)
 
-                        speech_tokens = speech_tokens[speech_tokens < 6561]
+                        # Apply drop_invalid_tokens
+                        # Note: drop_invalid_tokens expects a 1D tensor and returns processed tokens
+                        speech_tokens_processed = drop_invalid_tokens(speech_tokens)
+
+                        # Handle the return value from drop_invalid_tokens
+                        if isinstance(speech_tokens_processed, list):
+                            # If it returns a list, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif isinstance(speech_tokens_processed, tuple):
+                            # If it returns a tuple, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif torch.is_tensor(speech_tokens_processed):
+                            # If it returns a tensor, use it directly
+                            speech_tokens = speech_tokens_processed
+                        else:
+                            # Fallback to original if unexpected return type
+                            warnings.warn(
+                                f"Unexpected return type from drop_invalid_tokens: {type(speech_tokens_processed)}")
+
+                        # Ensure tensor and apply token range filter
+                        if not torch.is_tensor(speech_tokens):
+                            speech_tokens = torch.tensor(speech_tokens, device=self.device)
+
+                        # Filter tokens to valid range (less than vocabulary size)
+                        # Note: Only apply this filter if we have valid tokens
+                        if speech_tokens.numel() > 0:
+                            valid_mask = speech_tokens < 6561
+                            speech_tokens = speech_tokens[valid_mask]
+
+                        # Ensure we have at least some tokens
+                        if speech_tokens.numel() == 0:
+                            warnings.warn(f"No valid speech tokens for item {i}, using fallback")
+                            speech_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
+                                                         device=self.device)
+
                         speech_tokens = speech_tokens.to(self.device)
-
                         processed_speech_tokens.append(speech_tokens)
                         s3gen_ref_dicts.append(conditionals[i].gen)
 
                     except Exception as e:
                         warnings.warn(f"Failed to process speech tokens for item {i}: {str(e)}")
                         # Create fallback speech tokens
-                        fallback_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token], device=self.device)
+                        fallback_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
+                                                       device=self.device)
                         processed_speech_tokens.append(fallback_tokens)
                         s3gen_ref_dicts.append(conditionals[i].gen)
 
@@ -452,8 +487,14 @@ class ChatterboxTTS:
 
                 # Process final results
                 results = []
-                for i, (wav, _) in enumerate(s3gen_results):
+                for i, result in enumerate(s3gen_results):
                     try:
+                        # Handle different return formats from S3Gen
+                        if isinstance(result, tuple):
+                            wav, _ = result
+                        else:
+                            wav = result
+
                         wav = wav.squeeze(0).detach().cpu().numpy()
                         watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
                         results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
@@ -466,17 +507,18 @@ class ChatterboxTTS:
         except Exception as e:
             warnings.warn(f"Batch processing failed, falling back to individual processing: {str(e)}")
             # Fallback to individual processing
-            return self._process_sub_batch_fallback(texts, conditionals, cfg_weights, temperatures, repetition_penalties, min_ps, top_ps)
+            return self._process_sub_batch_fallback(texts, conditionals, cfg_weights, temperatures,
+                                                    repetition_penalties, min_ps, top_ps)
 
     def _process_sub_batch_fallback(
-        self,
-        texts: List[str],
-        conditionals: List[Conditionals],
-        cfg_weights: List[float],
-        temperatures: List[float],
-        repetition_penalties: List[float],
-        min_ps: List[float],
-        top_ps: List[float]
+            self,
+            texts: List[str],
+            conditionals: List[Conditionals],
+            cfg_weights: List[float],
+            temperatures: List[float],
+            repetition_penalties: List[float],
+            min_ps: List[float],
+            top_ps: List[float]
     ) -> List[torch.Tensor]:
         """Fallback to individual processing when batch processing fails."""
         batch_size = len(texts)
@@ -485,7 +527,7 @@ class ChatterboxTTS:
         results = []
         for i in range(batch_size):
             try:
-                text_tokens = batch_text_tokens[i:i+1]
+                text_tokens = batch_text_tokens[i:i + 1]
                 text_tokens = text_tokens[text_tokens != 0]  # Remove padding
 
                 if cfg_weights[i] > 0.0:
@@ -530,15 +572,15 @@ class ChatterboxTTS:
         return results
 
     def generate(
-        self,
-        text,
-        repetition_penalty=1.2,
-        min_p=0.05,
-        top_p=1.0,
-        audio_prompt_path=None,
-        exaggeration=0.5,
-        cfg_weight=0.5,
-        temperature=0.8,
+            self,
+            text,
+            repetition_penalty=1.2,
+            min_p=0.05,
+            top_p=1.0,
+            audio_prompt_path=None,
+            exaggeration=0.5,
+            cfg_weight=0.5,
+            temperature=0.8,
     ):
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
@@ -582,7 +624,7 @@ class ChatterboxTTS:
 
             # TODO: output becomes 1D
             speech_tokens = drop_invalid_tokens(speech_tokens)
-            
+
             speech_tokens = speech_tokens[speech_tokens < 6561]
 
             speech_tokens = speech_tokens.to(self.device)
