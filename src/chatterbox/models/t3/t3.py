@@ -387,27 +387,21 @@ class T3(nn.Module):
         device = self.device
 
         # 1. Prepare inputs (Padding and Batching)
-        max_text_len = max(t.shape[-1] for t in text_tokens_batch)
-        padded_text_tokens = torch.stack([
-            torch.nn.functional.pad(t, (0, max_text_len - t.shape[-1]), value=self.hp.stop_text_token)
-            for t in text_tokens_batch
-        ]).to(dtype=torch.long, device=device)
+        padded_text_tokens = torch.cat(text_tokens_batch, dim=0).to(dtype=torch.long, device=device)
 
         batched_t3_cond = T3Cond(
             speaker_emb=torch.cat([c.speaker_emb for c in t3_cond_batch], dim=0),
             cond_prompt_speech_tokens=torch.cat([c.cond_prompt_speech_tokens for c in t3_cond_batch if c.cond_prompt_speech_tokens is not None], dim=0) if any(c.cond_prompt_speech_tokens is not None for c in t3_cond_batch) else None,
             emotion_adv=torch.cat([c.emotion_adv for c in t3_cond_batch], dim=0)
-        ).to(device=device)
+        ).to(device)
 
         # Prepare for CFG
-        cfg_batch_size = batch_size * 2
         padded_text_tokens_cfg = padded_text_tokens.repeat(2, 1)
-        # Create a dummy T3Cond for CFG expansion
         batched_t3_cond_cfg = T3Cond(
             speaker_emb=batched_t3_cond.speaker_emb.repeat(2, 1, 1),
             cond_prompt_speech_tokens=batched_t3_cond.cond_prompt_speech_tokens.repeat(2, 1) if batched_t3_cond.cond_prompt_speech_tokens is not None else None,
             emotion_adv=batched_t3_cond.emotion_adv.repeat(2, 1, 1)
-        ).to(device=device)
+        ).to(device)
 
         if initial_speech_tokens_batch is None:
             initial_speech_tokens = torch.full((batch_size, 1), self.hp.start_speech_token, device=device, dtype=torch.long)
@@ -467,8 +461,6 @@ class T3(nn.Module):
 
             combined_logits = combined_logits / temperatures_t
 
-            # For simplicity, using top-p, min-p from the first item if they are heterogeneous
-            # A fully vectorized version would require a batched implementation of the warpers
             top_p_warper = TopPLogitsWarper(top_p=top_ps[0])
             min_p_warper = MinPLogitsWarper(min_p=min_ps[0])
             combined_logits = min_p_warper(generated_tokens, combined_logits)
