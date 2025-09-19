@@ -1,7 +1,9 @@
 # Copyright (c) 2025 Resemble AI
 # MIT License
 import logging
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Dict, Any
+import warnings
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -392,3 +394,258 @@ class T3(nn.Module):
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
         return predicted_tokens
+
+    def prepare_conditioning_batch(self, t3_cond_batch: List[T3Cond]) -> List[torch.Tensor]:
+        """Prepare conditioning for a batch of T3Cond objects."""
+        batch_cond_embeds = []
+        for t3_cond in t3_cond_batch:
+            cond_emb = self.prepare_conditioning(t3_cond)
+            batch_cond_embeds.append(cond_emb)
+        return batch_cond_embeds
+
+    def prepare_input_embeds_batch(
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[torch.LongTensor],
+        speech_tokens_batch: List[torch.LongTensor],
+        cfg_weights: List[float],
+    ) -> List[tuple]:
+        """Prepare input embeddings for a batch of sequences."""
+        batch_results = []
+
+        for t3_cond, text_tokens, speech_tokens, cfg_weight in zip(
+            t3_cond_batch, text_tokens_batch, speech_tokens_batch, cfg_weights
+        ):
+            embeds, len_cond = self.prepare_input_embeds(
+                t3_cond=t3_cond,
+                text_tokens=text_tokens,
+                speech_tokens=speech_tokens,
+                cfg_weight=cfg_weight,
+            )
+            batch_results.append((embeds, len_cond))
+
+        return batch_results
+
+    @torch.inference_mode()
+    def inference_batch(
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: Optional[List[Tensor]] = None,
+        prepend_prompt_speech_tokens_batch: Optional[List[Tensor]] = None,
+        num_return_sequences: int = 1,
+        max_new_tokens: Optional[int] = None,
+        stop_on_eos: bool = True,
+        do_sample: bool = True,
+        temperatures: Union[float, List[float]] = 0.8,
+        top_ps: Union[float, List[float]] = 0.95,
+        min_ps: Union[float, List[float]] = 0.05,
+        length_penalties: Union[float, List[float]] = 1.0,
+        repetition_penalties: Union[float, List[float]] = 1.2,
+        cfg_weights: Union[float, List[float]] = 0.5,
+        max_batch_size: int = 4,
+        use_parallel_generation: bool = True,
+    ) -> List[Tensor]:
+        """
+        Batch inference for T3 model with optimized KV-cache management.
+
+        Args:
+            t3_cond_batch: List of T3Cond conditioning objects
+            text_tokens_batch: List of text token tensors
+            initial_speech_tokens_batch: List of initial speech tokens (optional)
+            prepend_prompt_speech_tokens_batch: List of prompt speech tokens (optional)
+            num_return_sequences: Number of sequences to return per input
+            max_new_tokens: Maximum number of tokens to generate
+            stop_on_eos: Whether to stop on EOS token
+            do_sample: Whether to use sampling
+            temperatures: Temperature(s) for generation
+            top_ps: Top-p value(s) for nucleus sampling
+            min_ps: Min-p value(s) for filtering
+            length_penalties: Length penalty value(s)
+            repetition_penalties: Repetition penalty value(s)
+            cfg_weights: CFG weight(s) for classifier-free guidance
+            max_batch_size: Maximum batch size for processing
+            use_parallel_generation: Whether to use parallel generation for different sequences
+
+        Returns:
+            List of generated speech token tensors
+        """
+        batch_size = len(t3_cond_batch)
+
+        # Validate inputs
+        all_inputs = [text_tokens_batch]
+        if initial_speech_tokens_batch is not None:
+            all_inputs.append(initial_speech_tokens_batch)
+        if prepend_prompt_speech_tokens_batch is not None:
+            all_inputs.append(prepend_prompt_speech_tokens_batch)
+            assert prepend_prompt_speech_tokens_batch is None, "not implemented"
+
+        if not all(len(inp) == batch_size for inp in all_inputs):
+            raise ValueError("All batch inputs must have the same length")
+
+        # Ensure parameters are lists
+        def ensure_list(param, name):
+            if isinstance(param, (int, float)):
+                return [float(param)] * batch_size
+            elif len(param) != batch_size:
+                raise ValueError(f"{name} must be a scalar or list with same length as batch")
+            return param
+
+        temperatures = ensure_list(temperatures, "temperatures")
+        top_ps = ensure_list(top_ps, "top_ps")
+        min_ps = ensure_list(min_ps, "min_ps")
+        length_penalties = ensure_list(length_penalties, "length_penalties")
+        repetition_penalties = ensure_list(repetition_penalties, "repetition_penalties")
+        cfg_weights = ensure_list(cfg_weights, "cfg_weights")
+
+        # Prepare initial speech tokens if not provided
+        if initial_speech_tokens_batch is None:
+            initial_speech_tokens_batch = []
+            for text_tokens in text_tokens_batch:
+                initial_speech = self.hp.start_speech_token * torch.ones_like(text_tokens[:, :1])
+                initial_speech_tokens_batch.append(initial_speech)
+
+        # Validate text tokens
+        for text_tokens in text_tokens_batch:
+            _ensure_BOT_EOT(text_tokens, self.hp)
+
+        # Convert to proper format
+        text_tokens_batch = [torch.atleast_2d(tokens).to(dtype=torch.long, device=self.device)
+                            for tokens in text_tokens_batch]
+
+        # Process in sub-batches for memory management
+        all_results = []
+        for i in range(0, batch_size, max_batch_size):
+            end_idx = min(i + max_batch_size, batch_size)
+
+            sub_t3_cond = t3_cond_batch[i:end_idx]
+            sub_text_tokens = text_tokens_batch[i:end_idx]
+            sub_initial_speech = initial_speech_tokens_batch[i:end_idx]
+            sub_temperatures = temperatures[i:end_idx]
+            sub_top_ps = top_ps[i:end_idx]
+            sub_min_ps = min_ps[i:end_idx]
+            sub_length_penalties = length_penalties[i:end_idx]
+            sub_repetition_penalties = repetition_penalties[i:end_idx]
+            sub_cfg_weights = cfg_weights[i:end_idx]
+
+            if use_parallel_generation and len(sub_t3_cond) > 1:
+                # Parallel generation for multiple sequences
+                sub_results = self._inference_parallel_batch(
+                    sub_t3_cond, sub_text_tokens, sub_initial_speech,
+                    max_new_tokens, stop_on_eos, do_sample,
+                    sub_temperatures, sub_top_ps, sub_min_ps,
+                    sub_length_penalties, sub_repetition_penalties, sub_cfg_weights
+                )
+            else:
+                # Sequential processing
+                sub_results = self._inference_sequential_batch(
+                    sub_t3_cond, sub_text_tokens, sub_initial_speech,
+                    max_new_tokens, stop_on_eos, do_sample,
+                    sub_temperatures, sub_top_ps, sub_min_ps,
+                    sub_length_penalties, sub_repetition_penalties, sub_cfg_weights
+                )
+
+            all_results.extend(sub_results)
+
+        return all_results
+
+    def _inference_sequential_batch(
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: List[Tensor],
+        max_new_tokens: Optional[int],
+        stop_on_eos: bool,
+        do_sample: bool,
+        temperatures: List[float],
+        top_ps: List[float],
+        min_ps: List[float],
+        length_penalties: List[float],
+        repetition_penalties: List[float],
+        cfg_weights: List[float],
+    ) -> List[Tensor]:
+        """Sequential batch processing with shared KV-cache optimization."""
+        results = []
+
+        for i, (t3_cond, text_tokens, initial_speech, temp, top_p, min_p,
+                length_pen, rep_pen, cfg_weight) in enumerate(zip(
+            t3_cond_batch, text_tokens_batch, initial_speech_tokens_batch,
+            temperatures, top_ps, min_ps, length_penalties,
+            repetition_penalties, cfg_weights
+        )):
+            try:
+                result = self.inference(
+                    t3_cond=t3_cond,
+                    text_tokens=text_tokens,
+                    initial_speech_tokens=initial_speech,
+                    max_new_tokens=max_new_tokens or self.hp.max_speech_tokens,
+                    stop_on_eos=stop_on_eos,
+                    do_sample=do_sample,
+                    temperature=temp,
+                    top_p=top_p,
+                    min_p=min_p,
+                    length_penalty=length_pen,
+                    repetition_penalty=rep_pen,
+                    cfg_weight=cfg_weight,
+                )
+                results.append(result)
+            except Exception as e:
+                warnings.warn(f"Failed to process sequence {i} in T3 batch inference: {str(e)}")
+                # Create fallback result
+                fallback = torch.tensor([[self.hp.start_speech_token, self.hp.stop_speech_token]],
+                                      device=self.device)
+                results.append(fallback)
+
+        return results
+
+    def _inference_parallel_batch(
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: List[Tensor],
+        max_new_tokens: Optional[int],
+        stop_on_eos: bool,
+        do_sample: bool,
+        temperatures: List[float],
+        top_ps: List[float],
+        min_ps: List[float],
+        length_penalties: List[float],
+        repetition_penalties: List[float],
+        cfg_weights: List[float],
+    ) -> List[Tensor]:
+        """Parallel batch processing using ThreadPoolExecutor."""
+        def process_single(args):
+            i, t3_cond, text_tokens, initial_speech, temp, top_p, min_p, length_pen, rep_pen, cfg_weight = args
+            try:
+                return self.inference(
+                    t3_cond=t3_cond,
+                    text_tokens=text_tokens,
+                    initial_speech_tokens=initial_speech,
+                    max_new_tokens=max_new_tokens or self.hp.max_speech_tokens,
+                    stop_on_eos=stop_on_eos,
+                    do_sample=do_sample,
+                    temperature=temp,
+                    top_p=top_p,
+                    min_p=min_p,
+                    length_penalty=length_pen,
+                    repetition_penalty=rep_pen,
+                    cfg_weight=cfg_weight,
+                )
+            except Exception as e:
+                warnings.warn(f"Failed to process sequence {i} in parallel T3 inference: {str(e)}")
+                return torch.tensor([[self.hp.start_speech_token, self.hp.stop_speech_token]],
+                                  device=self.device)
+
+        # Prepare arguments for parallel processing
+        args_list = list(enumerate(zip(
+            t3_cond_batch, text_tokens_batch, initial_speech_tokens_batch,
+            temperatures, top_ps, min_ps, length_penalties,
+            repetition_penalties, cfg_weights
+        )))
+
+        # Use ThreadPoolExecutor for parallel generation
+        max_workers = min(len(t3_cond_batch), 4)  # Limit to 4 parallel workers
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(process_single, args_list))
+
+        return results

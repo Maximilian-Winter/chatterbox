@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import threading
+import warnings
+from typing import List, Union
 import torch
 import torch.nn.functional as F
 from .matcha.flow_matching import BASECFM
@@ -184,6 +186,115 @@ class ConditionalCFM(BASECFM):
         loss = F.mse_loss(pred * mask, u * mask, reduction="sum") / (torch.sum(mask) * u.shape[1])
         return loss, y
 
+    @torch.inference_mode()
+    def forward_batch(
+        self,
+        mu_batch: List[torch.Tensor],
+        mask_batch: List[torch.Tensor],
+        spks_batch: List[torch.Tensor],
+        cond_batch: List[torch.Tensor],
+        n_timesteps: int,
+        temperature: float = 1.0,
+        max_batch_size: int = 4,
+    ) -> List[torch.Tensor]:
+        """
+        Batch forward diffusion for multiple sequences.
+
+        Args:
+            mu_batch: List of encoder outputs, each shape (1, n_feats, mel_timesteps)
+            mask_batch: List of output masks, each shape (1, 1, mel_timesteps)
+            spks_batch: List of speaker embeddings, each shape (1, spk_emb_dim)
+            cond_batch: List of conditions, each shape (1, n_feats, mel_timesteps)
+            n_timesteps: Number of diffusion steps
+            temperature: Temperature for scaling noise
+            max_batch_size: Maximum batch size for sub-batching
+
+        Returns:
+            List of generated mel-spectrograms
+        """
+        batch_size = len(mu_batch)
+        if not all(len(b) == batch_size for b in [mask_batch, spks_batch, cond_batch]):
+            raise ValueError("All batch inputs must have the same length")
+
+        # Process in sub-batches to manage memory
+        all_outputs = []
+        for i in range(0, batch_size, max_batch_size):
+            end_idx = min(i + max_batch_size, batch_size)
+            sub_mu = mu_batch[i:end_idx]
+            sub_mask = mask_batch[i:end_idx]
+            sub_spks = spks_batch[i:end_idx]
+            sub_cond = cond_batch[i:end_idx]
+
+            # Group by similar lengths for efficient processing
+            length_groups = {}
+            for j, (mu, mask, spks, cond) in enumerate(zip(sub_mu, sub_mask, sub_spks, sub_cond)):
+                mel_len = mu.shape[2]
+                length_key = (mel_len // 10) * 10  # Group by 10-frame chunks
+
+                if length_key not in length_groups:
+                    length_groups[length_key] = []
+                length_groups[length_key].append((j, mu, mask, spks, cond))
+
+            # Process each length group
+            sub_outputs = [None] * len(sub_mu)
+            for length_key, group in length_groups.items():
+                if len(group) == 1:
+                    # Single item - process normally
+                    j, mu, mask, spks, cond = group[0]
+                    try:
+                        output = self.forward(mu, mask, n_timesteps, temperature, spks, cond)
+                        sub_outputs[j] = output[0] if isinstance(output, tuple) else output
+                    except Exception as e:
+                        warnings.warn(f"Failed to process single item in flow matching: {str(e)}")
+                        sub_outputs[j] = torch.zeros_like(mu)
+                else:
+                    # Multiple items with similar length - attempt batch processing
+                    try:
+                        indices, mus, masks, spks_list, conds = zip(*group)
+                        max_len = max(mu.shape[2] for mu in mus)
+
+                        # Pad to same length and batch
+                        padded_mus, padded_masks, padded_conds = [], [], []
+                        for mu, mask, cond in zip(mus, masks, conds):
+                            if mu.shape[2] < max_len:
+                                pad_len = max_len - mu.shape[2]
+                                mu = F.pad(mu, (0, pad_len))
+                                mask = F.pad(mask, (0, pad_len))
+                                cond = F.pad(cond, (0, pad_len))
+                            padded_mus.append(mu)
+                            padded_masks.append(mask)
+                            padded_conds.append(cond)
+
+                        batch_mu = torch.cat(padded_mus, dim=0)
+                        batch_mask = torch.cat(padded_masks, dim=0)
+                        batch_spks = torch.cat(spks_list, dim=0)
+                        batch_cond = torch.cat(padded_conds, dim=0)
+
+                        # Process batched
+                        batch_output = self.forward(batch_mu, batch_mask, n_timesteps, temperature, batch_spks, batch_cond)
+                        if isinstance(batch_output, tuple):
+                            batch_output = batch_output[0]
+
+                        # Split back to individual outputs
+                        for k, idx in enumerate(indices):
+                            original_len = mus[k].shape[2]
+                            sub_outputs[idx] = batch_output[k:k+1, :, :original_len]
+
+                    except Exception as e:
+                        warnings.warn(f"Batch processing failed, falling back to individual processing: {str(e)}")
+                        # Fallback to individual processing
+                        for j, mu, mask, spks, cond in group:
+                            try:
+                                output = self.forward(mu, mask, n_timesteps, temperature, spks, cond)
+                                sub_outputs[j] = output[0] if isinstance(output, tuple) else output
+                            except Exception as e2:
+                                warnings.warn(f"Individual fallback failed: {str(e2)}")
+                                sub_outputs[j] = torch.zeros_like(mu)
+
+            all_outputs.extend(sub_outputs)
+
+        return all_outputs
+
 
 class CausalConditionalCFM(ConditionalCFM):
     def __init__(self, in_channels=240, cfm_params=CFM_PARAMS, n_spks=1, spk_emb_dim=80, estimator=None):
@@ -216,3 +327,43 @@ class CausalConditionalCFM(ConditionalCFM):
         if self.t_scheduler == 'cosine':
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), None
+
+    @torch.inference_mode()
+    def forward_batch(
+        self,
+        mu_batch: List[torch.Tensor],
+        mask_batch: List[torch.Tensor],
+        spks_batch: List[torch.Tensor],
+        cond_batch: List[torch.Tensor],
+        n_timesteps: int,
+        temperature: float = 1.0,
+        max_batch_size: int = 4,
+    ) -> List[torch.Tensor]:
+        """
+        Batch forward diffusion for CausalConditionalCFM.
+        Similar to parent class but uses fixed noise pattern.
+        """
+        batch_size = len(mu_batch)
+        if not all(len(b) == batch_size for b in [mask_batch, spks_batch, cond_batch]):
+            raise ValueError("All batch inputs must have the same length")
+
+        all_outputs = []
+        for i in range(0, batch_size, max_batch_size):
+            end_idx = min(i + max_batch_size, batch_size)
+            sub_mu = mu_batch[i:end_idx]
+            sub_mask = mask_batch[i:end_idx]
+            sub_spks = spks_batch[i:end_idx]
+            sub_cond = cond_batch[i:end_idx]
+
+            sub_outputs = []
+            for mu, mask, spks, cond in zip(sub_mu, sub_mask, sub_spks, sub_cond):
+                try:
+                    output = self.forward(mu, mask, n_timesteps, temperature, spks, cond)
+                    sub_outputs.append(output[0] if isinstance(output, tuple) else output)
+                except Exception as e:
+                    warnings.warn(f"Failed to process item in causal flow matching: {str(e)}")
+                    sub_outputs.append(torch.zeros_like(mu))
+
+            all_outputs.extend(sub_outputs)
+
+        return all_outputs

@@ -13,7 +13,8 @@
 # limitations under the License.
 import logging
 import random
-from typing import Dict, Optional
+import warnings
+from typing import Dict, Optional, List, Union
 
 logger = logging.getLogger(__name__)
 import torch
@@ -255,7 +256,9 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
             prompt_feat = prompt_feat.half()
             embedding = embedding.half()
 
-        assert token.shape[0] == 1
+        # Support dynamic batch sizes (removed single batch restriction)
+        batch_size = token.shape[0]
+
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
         embedding = self.spk_embed_affine_layer(embedding)
@@ -288,3 +291,71 @@ class CausalMaskedDiffWithXvec(torch.nn.Module):
         feat = feat[:, :, mel_len1:]
         assert feat.shape[2] == mel_len2
         return feat.float(), None  # NOTE jrm: why are they returning None here?
+
+    @torch.inference_mode()
+    def inference_batch(
+        self,
+        token_batch: List[torch.Tensor],
+        token_len_batch: List[torch.Tensor],
+        prompt_token_batch: List[torch.Tensor],
+        prompt_token_len_batch: List[torch.Tensor],
+        prompt_feat_batch: List[torch.Tensor],
+        prompt_feat_len_batch: List[torch.Tensor],
+        embedding_batch: List[torch.Tensor],
+        finalize: bool = True,
+        max_batch_size: int = 4,
+    ) -> List[torch.Tensor]:
+        """
+        Batch inference for CausalMaskedDiffWithXvec.
+
+        Args:
+            token_batch: List of token tensors
+            token_len_batch: List of token length tensors
+            prompt_token_batch: List of prompt token tensors
+            prompt_token_len_batch: List of prompt token length tensors
+            prompt_feat_batch: List of prompt feature tensors
+            prompt_feat_len_batch: List of prompt feature length tensors
+            embedding_batch: List of embedding tensors
+            finalize: Whether to finalize (no lookahead)
+            max_batch_size: Maximum batch size for sub-batching
+
+        Returns:
+            List of output mel spectrograms
+        """
+        batch_size = len(token_batch)
+        all_inputs = [
+            token_len_batch, prompt_token_batch, prompt_token_len_batch,
+            prompt_feat_batch, prompt_feat_len_batch, embedding_batch
+        ]
+        if not all(len(inputs) == batch_size for inputs in all_inputs):
+            raise ValueError("All batch inputs must have the same length")
+
+        # Process in sub-batches to manage memory
+        all_outputs = []
+        for i in range(0, batch_size, max_batch_size):
+            end_idx = min(i + max_batch_size, batch_size)
+
+            sub_outputs = []
+            for j in range(i, end_idx):
+                try:
+                    output, _ = self.inference(
+                        token=token_batch[j],
+                        token_len=token_len_batch[j],
+                        prompt_token=prompt_token_batch[j],
+                        prompt_token_len=prompt_token_len_batch[j],
+                        prompt_feat=prompt_feat_batch[j],
+                        prompt_feat_len=prompt_feat_len_batch[j],
+                        embedding=embedding_batch[j],
+                        finalize=finalize,
+                    )
+                    sub_outputs.append(output)
+
+                except Exception as e:
+                    warnings.warn(f"Failed to process item {j} in flow inference: {str(e)}")
+                    # Create empty mel spectrogram as fallback
+                    empty_feat = torch.zeros(1, 80, 100, device=token_batch[j].device)
+                    sub_outputs.append(empty_feat)
+
+            all_outputs.extend(sub_outputs)
+
+        return all_outputs
