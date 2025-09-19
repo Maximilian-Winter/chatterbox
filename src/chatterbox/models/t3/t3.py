@@ -644,11 +644,12 @@ class T3(nn.Module):
                                   device=self.device)
 
         # Prepare arguments for parallel processing
-        args_list = list(enumerate(zip(
+        args_list = list(zip(
+            range(len(t3_cond_batch)),
             t3_cond_batch, text_tokens_batch, initial_speech_tokens_batch,
             temperatures, top_ps, min_ps, length_penalties,
             repetition_penalties, cfg_weights
-        )))
+        ))
 
         # Use ThreadPoolExecutor for parallel generation
         max_workers = min(len(t3_cond_batch), 4)  # Limit to 4 parallel workers

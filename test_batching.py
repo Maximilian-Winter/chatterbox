@@ -1,4 +1,5 @@
 from chatterbox import ChatterboxTTS
+import torchaudio as ta
 
 tts = ChatterboxTTS.from_pretrained("cuda")
 
@@ -11,3 +12,6 @@ outputs = tts.generate_batch(
     audio_prompt_paths=audio_paths,
     max_batch_size=8
 )
+
+for idx, audio in enumerate(outputs):
+    ta.save(f"test-{idx}.wav", audio, tts.sr)
