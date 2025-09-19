@@ -23,6 +23,7 @@ from .inference.t3_hf_backend import T3HuggingfaceBackend
 from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 from ..utils import AttrDict
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,16 +81,16 @@ class T3(nn.Module):
         """
         if t3_cond.cond_prompt_speech_tokens is not None and t3_cond.cond_prompt_speech_emb is None:
             t3_cond.cond_prompt_speech_emb = self.speech_emb(t3_cond.cond_prompt_speech_tokens) + \
-                                             self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
+                self.speech_pos_emb(t3_cond.cond_prompt_speech_tokens)
         return self.cond_enc(t3_cond)  # (B, len_cond, dim)
 
     def prepare_input_embeds(
-            self,
-            *,
-            t3_cond: T3Cond,
-            text_tokens: torch.LongTensor,
-            speech_tokens: torch.LongTensor,
-            cfg_weight: float = 0.0,
+        self,
+        *,
+        t3_cond: T3Cond,
+        text_tokens: torch.LongTensor,
+        speech_tokens: torch.LongTensor,
+        cfg_weight: float = 0.0,
     ):
         # prepare input embeddings (skip backbone tranformer embeddings)
         cond_emb = self.prepare_conditioning(t3_cond)  # (B, len_cond, dim)
@@ -121,14 +122,14 @@ class T3(nn.Module):
         return embeds, len_cond
 
     def forward(
-            self,
-            *,
-            t3_cond: T3Cond,
-            text_tokens: torch.LongTensor,
-            text_token_lens: torch.LongTensor,
-            speech_tokens: torch.LongTensor,
-            speech_token_lens: torch.LongTensor,
-            training=False,
+        self,
+        *,
+        t3_cond: T3Cond,
+        text_tokens: torch.LongTensor,
+        text_token_lens: torch.LongTensor,
+        speech_tokens: torch.LongTensor,
+        speech_token_lens: torch.LongTensor,
+        training=False,
     ):
         _ensure_BOT_EOT(text_tokens, self.hp)
 
@@ -178,13 +179,13 @@ class T3(nn.Module):
         )
 
     def loss(
-            self,
-            *,
-            t3_cond: T3Cond,
-            text_tokens: torch.LongTensor,
-            text_token_lens: torch.LongTensor,
-            speech_tokens: torch.LongTensor,
-            speech_token_lens: torch.LongTensor,
+        self,
+        *,
+        t3_cond: T3Cond,
+        text_tokens: torch.LongTensor,
+        text_token_lens: torch.LongTensor,
+        speech_tokens: torch.LongTensor,
+        speech_token_lens: torch.LongTensor,
     ):
         "training method"
         len_text = text_tokens.size(1)
@@ -215,32 +216,30 @@ class T3(nn.Module):
 
     @torch.inference_mode()
     def inference(
-            self,
-            *,
-            t3_cond: T3Cond,
-            text_tokens: Tensor,
-            initial_speech_tokens: Optional[Tensor] = None,
+        self,
+        *,
+        t3_cond: T3Cond,
+        text_tokens: Tensor,
+        initial_speech_tokens: Optional[Tensor]=None,
 
-            # misc conditioning
-            prepend_prompt_speech_tokens: Optional[Tensor] = None,
+        # misc conditioning
+        prepend_prompt_speech_tokens: Optional[Tensor]=None,
 
-            # HF generate args
-            num_return_sequences=1,
-            max_new_tokens=None,
-            stop_on_eos=True,
-            do_sample=True,
-            temperature=0.8,
-            top_p=0.95,
-            min_p=0.05,
-            length_penalty=1.0,
-            repetition_penalty=1.2,
-            cfg_weight=0.5,
-            disable_alignment_analyzer=False,  # Add option to disable alignment analyzer
+        # HF generate args
+        num_return_sequences=1,
+        max_new_tokens=None,
+        stop_on_eos=True,
+        do_sample=True,
+        temperature=0.8,
+        top_p=0.95,
+        min_p=0.05,
+        length_penalty=1.0,
+        repetition_penalty=1.2,
+        cfg_weight=0.5,
     ):
         """
         Args:
             text_tokens: a 1D (unbatched) or 2D (batched) tensor.
-            disable_alignment_analyzer: If True, disable alignment analyzer even for multilingual models
         """
         # Validate / sanitize inputs
         assert prepend_prompt_speech_tokens is None, "not implemented"
@@ -269,20 +268,15 @@ class T3(nn.Module):
         if not self.compiled:
             # Default to None for English models, only create for multilingual
             alignment_stream_analyzer = None
-            # Check if is_multilingual attribute exists and is True
-            if hasattr(self.hp, 'is_multilingual') and self.hp.is_multilingual and not disable_alignment_analyzer:
-                try:
-                    alignment_stream_analyzer = AlignmentStreamAnalyzer(
-                        self.tfmr,
-                        None,
-                        text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
-                        alignment_layer_idx=9,  # TODO: hparam or something?
-                        eos_idx=self.hp.stop_speech_token,
-                    )
-                    assert alignment_stream_analyzer.eos_idx == self.hp.stop_speech_token
-                except Exception as e:
-                    logger.warning(f"Failed to initialize alignment analyzer: {str(e)}")
-                    alignment_stream_analyzer = None
+            if self.hp.is_multilingual:
+                alignment_stream_analyzer = AlignmentStreamAnalyzer(
+                    self.tfmr,
+                    None,
+                    text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
+                    alignment_layer_idx=9, # TODO: hparam or something?
+                    eos_idx=self.hp.stop_speech_token,
+                )
+                assert alignment_stream_analyzer.eos_idx == self.hp.stop_speech_token
 
             patched_model = T3HuggingfaceBackend(
                 config=self.cfg,
@@ -293,6 +287,23 @@ class T3(nn.Module):
             )
             self.patched_model = patched_model
             self.compiled = True
+
+        # # Run normal generate method, which calls our custom extended methods
+        # return self.patched_model.generate(
+        #     inputs=initial_speech_tokens,
+        #     decoder_cond=embeds,
+        #     bos_token_id=self.hp.start_speech_token,
+        #     eos_token_id=(self.hp.stop_speech_token if stop_on_eos else -1),
+        #     pad_token_id=self.hp.stop_speech_token,
+        #     max_new_tokens=max_new_tokens or self.hp.max_speech_tokens,
+        #     num_return_sequences=num_return_sequences,
+        #     temperature=temperature,
+        #     min_p=min_p,
+        #     length_penalty=length_penalty,
+        #     repetition_penalty=repetition_penalty,
+        #     do_sample=do_sample,
+        #     # cache_implementation=None if not self.compiled else "static",
+        # )
 
         device = embeds.device
 
@@ -313,6 +324,7 @@ class T3(nn.Module):
         # Instantiate the logits processors.
         top_p_warper = TopPLogitsWarper(top_p=top_p)
         min_p_warper = MinPLogitsWarper(min_p=min_p)
+        top_p_warper = TopPLogitsWarper(top_p=top_p)
         repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=float(repetition_penalty))
 
         # ---- Initial Forward Pass (no kv_cache yet) ----
@@ -327,35 +339,25 @@ class T3(nn.Module):
         # Initialize kv_cache with the full context.
         past = output.past_key_values
 
-        # Track consecutive repetitions for better repetition detection
-        consecutive_repetitions = 0
-        last_unique_token = None
-
         # ---- Generation Loop using kv_cache ----
-        for i in tqdm(range(max_new_tokens or self.hp.max_speech_tokens), desc="Sampling", dynamic_ncols=True):
+        for i in tqdm(range(max_new_tokens), desc="Sampling", dynamic_ncols=True):
             logits_step = output.logits[:, -1, :]
             # CFG combine  → (1, V)
-            cond = logits_step[0:1, :]
+            cond   = logits_step[0:1, :]
             uncond = logits_step[1:2, :]
             cfg = torch.as_tensor(cfg_weight, device=cond.device, dtype=cond.dtype)
             logits = cond + cfg * (cond - uncond)
 
-            # Apply alignment stream analyzer integrity checks (if enabled and not causing issues)
-            if self.patched_model.alignment_stream_analyzer is not None and i > 5:  # Skip first few tokens
-                if logits.dim() == 1:  # guard in case something upstream squeezed
-                    logits = logits.unsqueeze(0)  # (1, V)
+            # Apply alignment stream analyzer integrity checks
+            if self.patched_model.alignment_stream_analyzer is not None:
+                if logits.dim() == 1:            # guard in case something upstream squeezed
+                    logits = logits.unsqueeze(0) # (1, V)
                 # Pass the last generated token for repetition tracking
                 last_token = generated_ids[0, -1].item() if len(generated_ids[0]) > 0 else None
-
-                # Only apply analyzer if we're not in early generation phase
-                try:
-                    logits = self.patched_model.alignment_stream_analyzer.step(logits, next_token=last_token)  # (1, V)
-                except Exception as e:
-                    logger.warning(f"Alignment analyzer error at step {i}: {str(e)}")
-                    # Continue without analyzer if it fails
+                logits = self.patched_model.alignment_stream_analyzer.step(logits, next_token=last_token)  # (1, V)
 
             # Apply repetition penalty
-            ids_for_proc = generated_ids[:1, ...]  # batch = 1
+            ids_for_proc = generated_ids[:1, ...]   # batch = 1
             logits = repetition_penalty_processor(ids_for_proc, logits)  # expects (B,V)
 
             # Apply temperature scaling.
@@ -370,24 +372,12 @@ class T3(nn.Module):
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)  # shape: (B, 1)
 
-            # Manual repetition detection (as backup)
-            current_token = next_token.item()
-            if current_token == last_unique_token:
-                consecutive_repetitions += 1
-                # Only force EOS if we have many repetitions and we're not in early generation
-                if consecutive_repetitions > 5 and i > 10:
-                    logger.warning(f"Detected {consecutive_repetitions} consecutive repetitions, forcing EOS")
-                    next_token = torch.tensor([[self.hp.stop_speech_token]], device=device)
-            else:
-                consecutive_repetitions = 0
-                last_unique_token = current_token
-
             predicted.append(next_token)
             generated_ids = torch.cat([generated_ids, next_token], dim=1)
 
             # Check for EOS token.
             if next_token.view(-1) == self.hp.stop_speech_token:
-                logger.info(f"✅ EOS token detected! Stopping generation at step {i + 1}")
+                logger.info(f"✅ EOS token detected! Stopping generation at step {i+1}")
                 break
 
             # Get embedding for the new token.
@@ -421,17 +411,17 @@ class T3(nn.Module):
         return batch_cond_embeds
 
     def prepare_input_embeds_batch(
-            self,
-            t3_cond_batch: List[T3Cond],
-            text_tokens_batch: List[torch.LongTensor],
-            speech_tokens_batch: List[torch.LongTensor],
-            cfg_weights: List[float],
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[torch.LongTensor],
+        speech_tokens_batch: List[torch.LongTensor],
+        cfg_weights: List[float],
     ) -> List[tuple]:
         """Prepare input embeddings for a batch of sequences."""
         batch_results = []
 
         for t3_cond, text_tokens, speech_tokens, cfg_weight in zip(
-                t3_cond_batch, text_tokens_batch, speech_tokens_batch, cfg_weights
+            t3_cond_batch, text_tokens_batch, speech_tokens_batch, cfg_weights
         ):
             embeds, len_cond = self.prepare_input_embeds(
                 t3_cond=t3_cond,
@@ -445,30 +435,47 @@ class T3(nn.Module):
 
     @torch.inference_mode()
     def inference_batch(
-            self,
-            t3_cond_batch: List[T3Cond],
-            text_tokens_batch: List[Tensor],
-            initial_speech_tokens_batch: Optional[List[Tensor]] = None,
-            prepend_prompt_speech_tokens_batch: Optional[List[Tensor]] = None,
-            num_return_sequences: int = 1,
-            max_new_tokens: Optional[int] = None,
-            stop_on_eos: bool = True,
-            do_sample: bool = True,
-            temperatures: Union[float, List[float]] = 0.8,
-            top_ps: Union[float, List[float]] = 0.95,
-            min_ps: Union[float, List[float]] = 0.05,
-            length_penalties: Union[float, List[float]] = 1.0,
-            repetition_penalties: Union[float, List[float]] = 1.2,
-            cfg_weights: Union[float, List[float]] = 0.5,
-            max_batch_size: int = 4,
-            use_parallel_generation: bool = True,
-            disable_alignment_analyzer: bool = True,  # Default to True for batch to avoid issues
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: Optional[List[Tensor]] = None,
+        prepend_prompt_speech_tokens_batch: Optional[List[Tensor]] = None,
+        num_return_sequences: int = 1,
+        max_new_tokens: Optional[int] = None,
+        stop_on_eos: bool = True,
+        do_sample: bool = True,
+        temperatures: Union[float, List[float]] = 0.8,
+        top_ps: Union[float, List[float]] = 0.95,
+        min_ps: Union[float, List[float]] = 0.05,
+        length_penalties: Union[float, List[float]] = 1.0,
+        repetition_penalties: Union[float, List[float]] = 1.2,
+        cfg_weights: Union[float, List[float]] = 0.5,
+        max_batch_size: int = 4,
+        use_parallel_generation: bool = True,
     ) -> List[Tensor]:
         """
         Batch inference for T3 model with optimized KV-cache management.
 
-        Note: disable_alignment_analyzer is set to True by default for batch processing
-        to avoid issues with the alignment analyzer in batch mode.
+        Args:
+            t3_cond_batch: List of T3Cond conditioning objects
+            text_tokens_batch: List of text token tensors
+            initial_speech_tokens_batch: List of initial speech tokens (optional)
+            prepend_prompt_speech_tokens_batch: List of prompt speech tokens (optional)
+            num_return_sequences: Number of sequences to return per input
+            max_new_tokens: Maximum number of tokens to generate
+            stop_on_eos: Whether to stop on EOS token
+            do_sample: Whether to use sampling
+            temperatures: Temperature(s) for generation
+            top_ps: Top-p value(s) for nucleus sampling
+            min_ps: Min-p value(s) for filtering
+            length_penalties: Length penalty value(s)
+            repetition_penalties: Repetition penalty value(s)
+            cfg_weights: CFG weight(s) for classifier-free guidance
+            max_batch_size: Maximum batch size for processing
+            use_parallel_generation: Whether to use parallel generation for different sequences
+
+        Returns:
+            List of generated speech token tensors
         """
         batch_size = len(t3_cond_batch)
 
@@ -511,7 +518,7 @@ class T3(nn.Module):
 
         # Convert to proper format
         text_tokens_batch = [torch.atleast_2d(tokens).to(dtype=torch.long, device=self.device)
-                             for tokens in text_tokens_batch]
+                            for tokens in text_tokens_batch]
 
         # Process in sub-batches for memory management
         all_results = []
@@ -528,34 +535,41 @@ class T3(nn.Module):
             sub_repetition_penalties = repetition_penalties[i:end_idx]
             sub_cfg_weights = cfg_weights[i:end_idx]
 
-            # Always use sequential processing for now to avoid batch issues
-            sub_results = self._inference_sequential_batch(
-                sub_t3_cond, sub_text_tokens, sub_initial_speech,
-                max_new_tokens, stop_on_eos, do_sample,
-                sub_temperatures, sub_top_ps, sub_min_ps,
-                sub_length_penalties, sub_repetition_penalties, sub_cfg_weights,
-                disable_alignment_analyzer
-            )
+            if use_parallel_generation and len(sub_t3_cond) > 1:
+                # Parallel generation for multiple sequences
+                sub_results = self._inference_parallel_batch(
+                    sub_t3_cond, sub_text_tokens, sub_initial_speech,
+                    max_new_tokens, stop_on_eos, do_sample,
+                    sub_temperatures, sub_top_ps, sub_min_ps,
+                    sub_length_penalties, sub_repetition_penalties, sub_cfg_weights
+                )
+            else:
+                # Sequential processing
+                sub_results = self._inference_sequential_batch(
+                    sub_t3_cond, sub_text_tokens, sub_initial_speech,
+                    max_new_tokens, stop_on_eos, do_sample,
+                    sub_temperatures, sub_top_ps, sub_min_ps,
+                    sub_length_penalties, sub_repetition_penalties, sub_cfg_weights
+                )
 
             all_results.extend(sub_results)
 
         return all_results
 
     def _inference_sequential_batch(
-            self,
-            t3_cond_batch: List[T3Cond],
-            text_tokens_batch: List[Tensor],
-            initial_speech_tokens_batch: List[Tensor],
-            max_new_tokens: Optional[int],
-            stop_on_eos: bool,
-            do_sample: bool,
-            temperatures: List[float],
-            top_ps: List[float],
-            min_ps: List[float],
-            length_penalties: List[float],
-            repetition_penalties: List[float],
-            cfg_weights: List[float],
-            disable_alignment_analyzer: bool = True,
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: List[Tensor],
+        max_new_tokens: Optional[int],
+        stop_on_eos: bool,
+        do_sample: bool,
+        temperatures: List[float],
+        top_ps: List[float],
+        min_ps: List[float],
+        length_penalties: List[float],
+        repetition_penalties: List[float],
+        cfg_weights: List[float],
     ) -> List[Tensor]:
         """Sequential batch processing with shared KV-cache optimization."""
         results = []
@@ -580,36 +594,33 @@ class T3(nn.Module):
                     length_penalty=length_pen,
                     repetition_penalty=rep_pen,
                     cfg_weight=cfg_weight,
-                    disable_alignment_analyzer=disable_alignment_analyzer,
                 )
                 results.append(result)
             except Exception as e:
                 warnings.warn(f"Failed to process sequence {i} in T3 batch inference: {str(e)}")
                 # Create fallback result
                 fallback = torch.tensor([[self.hp.start_speech_token, self.hp.stop_speech_token]],
-                                        device=self.device)
+                                      device=self.device)
                 results.append(fallback)
 
         return results
 
     def _inference_parallel_batch(
-            self,
-            t3_cond_batch: List[T3Cond],
-            text_tokens_batch: List[Tensor],
-            initial_speech_tokens_batch: List[Tensor],
-            max_new_tokens: Optional[int],
-            stop_on_eos: bool,
-            do_sample: bool,
-            temperatures: List[float],
-            top_ps: List[float],
-            min_ps: List[float],
-            length_penalties: List[float],
-            repetition_penalties: List[float],
-            cfg_weights: List[float],
-            disable_alignment_analyzer: bool = True,
+        self,
+        t3_cond_batch: List[T3Cond],
+        text_tokens_batch: List[Tensor],
+        initial_speech_tokens_batch: List[Tensor],
+        max_new_tokens: Optional[int],
+        stop_on_eos: bool,
+        do_sample: bool,
+        temperatures: List[float],
+        top_ps: List[float],
+        min_ps: List[float],
+        length_penalties: List[float],
+        repetition_penalties: List[float],
+        cfg_weights: List[float],
     ) -> List[Tensor]:
         """Parallel batch processing using ThreadPoolExecutor."""
-
         def process_single(args):
             i, t3_cond, text_tokens, initial_speech, temp, top_p, min_p, length_pen, rep_pen, cfg_weight = args
             try:
@@ -626,12 +637,11 @@ class T3(nn.Module):
                     length_penalty=length_pen,
                     repetition_penalty=rep_pen,
                     cfg_weight=cfg_weight,
-                    disable_alignment_analyzer=disable_alignment_analyzer,
                 )
             except Exception as e:
                 warnings.warn(f"Failed to process sequence {i} in parallel T3 inference: {str(e)}")
                 return torch.tensor([[self.hp.start_speech_token, self.hp.stop_speech_token]],
-                                    device=self.device)
+                                  device=self.device)
 
         # Prepare arguments for parallel processing
         args_list = list(zip(
