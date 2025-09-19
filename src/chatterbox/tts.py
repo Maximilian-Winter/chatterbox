@@ -275,33 +275,33 @@ class ChatterboxTTS:
         elif len(exaggerations) != len(wav_fpaths):
             raise ValueError("exaggerations must be a scalar or list with same length as wav_fpaths")
 
-        def process_single_conditional(args):
-            wav_fpath, exaggeration = args
-            s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
-            ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
+        # Batch load audio files
+        s3gen_ref_wavs = [librosa.load(f, sr=S3GEN_SR)[0] for f in wav_fpaths]
+        ref_16k_wavs = [librosa.resample(w, orig_sr=S3GEN_SR, target_sr=S3_SR) for w in s3gen_ref_wavs]
 
-            s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
-            s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        # Batch voice encoder embeddings
+        ve_embeds_numpy = self.ve.embeds_from_wavs(ref_16k_wavs, sample_rate=S3_SR)
+        ve_embeds = [torch.from_numpy(e).mean(axis=0, keepdim=True).to(self.device) for e in ve_embeds_numpy]
 
-            t3_cond_prompt_tokens = None
-            if plen := self.t3.hp.speech_cond_prompt_len:
-                s3_tokzr = self.s3gen.tokenizer
-                t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
-                t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+        # Batch T3 conditional prompt tokens
+        t3_cond_prompt_tokens_batch = None
+        if plen := self.t3.hp.speech_cond_prompt_len:
+            s3_tokzr = self.s3gen.tokenizer
+            prompt_wavs = [w[:self.ENC_COND_LEN] for w in ref_16k_wavs]
+            t3_cond_prompt_tokens_batch, _ = s3_tokzr.forward(prompt_wavs, max_len=plen)
+            t3_cond_prompt_tokens_batch = torch.atleast_2d(t3_cond_prompt_tokens_batch).to(self.device)
 
-            ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
-            ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+        # Create conditionals (s3gen.embed_ref is not batched)
+        conditionals = []
+        for i in range(len(wav_fpaths)):
+            s3gen_ref_dict = self.s3gen.embed_ref(s3gen_ref_wavs[i][:self.DEC_COND_LEN], S3GEN_SR, device=self.device)
 
             t3_cond = T3Cond(
-                speaker_emb=ve_embed,
-                cond_prompt_speech_tokens=t3_cond_prompt_tokens,
-                emotion_adv=exaggeration * torch.ones(1, 1, 1),
+                speaker_emb=ve_embeds[i],
+                cond_prompt_speech_tokens=t3_cond_prompt_tokens_batch[i:i + 1] if t3_cond_prompt_tokens_batch is not None else None,
+                emotion_adv=exaggerations[i] * torch.ones(1, 1, 1),
             ).to(device=self.device)
-
-            return Conditionals(t3_cond, s3gen_ref_dict)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            conditionals = list(executor.map(process_single_conditional, zip(wav_fpaths, exaggerations)))
+            conditionals.append(Conditionals(t3_cond, s3gen_ref_dict))
 
         return conditionals
 
@@ -375,138 +375,73 @@ class ChatterboxTTS:
             top_ps: List[float]
     ) -> List[torch.Tensor]:
         batch_size = len(texts)
+        device = self.device
 
         try:
-            # Prepare batch text tokens
-            batch_text_tokens = self._batch_tokenize_texts(texts)
+            # 1. Batch tokenize texts
+            batch_text_tokens = self._batch_tokenize_texts(texts)  # (batch_size, max_len)
 
-            # Prepare individual text token sequences for T3
-            t3_text_tokens_batch = []
-            t3_cond_batch = []
+            # 2. Combine conditionals
+            t3_cond_batch = [c.t3 for c in conditionals]
+            s3gen_ref_dicts = [c.gen for c in conditionals]
 
-            for i in range(batch_size):
-                text_tokens = batch_text_tokens[i]
-                text_tokens = text_tokens[text_tokens != 0]  # Remove padding
-
-                if cfg_weights[i] > 0.0:
-                    text_tokens = torch.cat([text_tokens.unsqueeze(0), text_tokens.unsqueeze(0)], dim=0)
-                else:
-                    text_tokens = text_tokens.unsqueeze(0)
-
-                sot = self.t3.hp.start_text_token
-                eot = self.t3.hp.stop_text_token
-                text_tokens = F.pad(text_tokens, (1, 0), value=sot)
-                text_tokens = F.pad(text_tokens, (0, 1), value=eot)
-
-                t3_text_tokens_batch.append(text_tokens)
-                t3_cond_batch.append(conditionals[i].t3)
-
-            # Batch T3 inference
+            # 3. Batch T3 inference
             with torch.inference_mode():
                 speech_tokens_batch = self.t3.inference_batch(
                     t3_cond_batch=t3_cond_batch,
-                    text_tokens_batch=t3_text_tokens_batch,
+                    text_tokens_batch=[batch_text_tokens[i:i + 1] for i in range(batch_size)],
                     max_new_tokens=1000,
                     temperatures=temperatures,
                     cfg_weights=cfg_weights,
                     repetition_penalties=repetition_penalties,
                     min_ps=min_ps,
                     top_ps=top_ps,
-                    max_batch_size=min(batch_size, 4),
-                    use_parallel_generation=batch_size > 1,
+                    max_batch_size=batch_size,
+                    use_parallel_generation=True,
                 )
 
-                # Process speech tokens and prepare for S3Gen
+                # 4. Process speech tokens for S3Gen
                 processed_speech_tokens = []
-                s3gen_ref_dicts = []
-
                 for i, speech_tokens in enumerate(speech_tokens_batch):
-                    try:
-                        # For CFG, take the first sequence
-                        if cfg_weights[i] > 0.0 and speech_tokens.dim() > 1 and speech_tokens.shape[0] > 1:
-                            speech_tokens = speech_tokens[0]
+                    if cfg_weights[i] > 0.0 and speech_tokens.dim() > 1 and speech_tokens.shape[0] > 1:
+                        speech_tokens = speech_tokens[0]
 
-                        # Ensure speech_tokens is 1D
-                        if speech_tokens.dim() > 1:
-                            speech_tokens = speech_tokens.squeeze(0)
+                    speech_tokens = drop_invalid_tokens(speech_tokens)
+                    if isinstance(speech_tokens, (list, tuple)):
+                        speech_tokens = speech_tokens[0] if speech_tokens else torch.tensor([], device=device)
 
-                        # Apply drop_invalid_tokens
-                        # Note: drop_invalid_tokens expects a 1D tensor and returns processed tokens
-                        speech_tokens_processed = drop_invalid_tokens(speech_tokens)
+                    if not torch.is_tensor(speech_tokens):
+                        speech_tokens = torch.tensor(speech_tokens, device=device)
 
-                        # Handle the return value from drop_invalid_tokens
-                        if isinstance(speech_tokens_processed, list):
-                            # If it returns a list, take the first element
-                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
-                        elif isinstance(speech_tokens_processed, tuple):
-                            # If it returns a tuple, take the first element
-                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
-                        elif torch.is_tensor(speech_tokens_processed):
-                            # If it returns a tensor, use it directly
-                            speech_tokens = speech_tokens_processed
-                        else:
-                            # Fallback to original if unexpected return type
-                            warnings.warn(
-                                f"Unexpected return type from drop_invalid_tokens: {type(speech_tokens_processed)}")
+                    speech_tokens = speech_tokens[speech_tokens < 6561]
 
-                        # Ensure tensor and apply token range filter
-                        if not torch.is_tensor(speech_tokens):
-                            speech_tokens = torch.tensor(speech_tokens, device=self.device)
+                    if speech_tokens.numel() == 0:
+                        warnings.warn(f"No valid speech tokens for item {i}, using fallback")
+                        speech_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
+                                                     device=device)
 
-                        # Filter tokens to valid range (less than vocabulary size)
-                        # Note: Only apply this filter if we have valid tokens
-                        if speech_tokens.numel() > 0:
-                            valid_mask = speech_tokens < 6561
-                            speech_tokens = speech_tokens[valid_mask]
+                    processed_speech_tokens.append(speech_tokens.to(device))
 
-                        # Ensure we have at least some tokens
-                        if speech_tokens.numel() == 0:
-                            warnings.warn(f"No valid speech tokens for item {i}, using fallback")
-                            speech_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
-                                                         device=self.device)
-
-                        speech_tokens = speech_tokens.to(self.device)
-                        processed_speech_tokens.append(speech_tokens)
-                        s3gen_ref_dicts.append(conditionals[i].gen)
-
-                    except Exception as e:
-                        warnings.warn(f"Failed to process speech tokens for item {i}: {str(e)}")
-                        # Create fallback speech tokens
-                        fallback_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
-                                                       device=self.device)
-                        processed_speech_tokens.append(fallback_tokens)
-                        s3gen_ref_dicts.append(conditionals[i].gen)
-
-                # Batch S3Gen inference
+                # 5. Batch S3Gen inference
                 s3gen_results = self.s3gen.inference_batch(
                     speech_tokens_batch=processed_speech_tokens,
                     ref_dicts_batch=s3gen_ref_dicts,
                     finalize=True,
-                    max_batch_size=min(batch_size, 4),
+                    max_batch_size=batch_size,
                 )
 
-                # Process final results
+                # 6. Process final results
                 results = []
                 for i, result in enumerate(s3gen_results):
-                    try:
-                        # Handle different return formats from S3Gen
-                        if isinstance(result, tuple):
-                            wav, _ = result
-                        else:
-                            wav = result
-
-                        wav = wav.squeeze(0).detach().cpu().numpy()
-                        watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-                        results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
-                    except Exception as e:
-                        warnings.warn(f"Failed to process final output for item {i}: {str(e)}")
-                        results.append(torch.zeros(1, 1000))
+                    wav = result[0] if isinstance(result, tuple) else result
+                    wav = wav.squeeze(0).detach().cpu().numpy()
+                    watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+                    results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
 
                 return results
 
         except Exception as e:
             warnings.warn(f"Batch processing failed, falling back to individual processing: {str(e)}")
-            # Fallback to individual processing
             return self._process_sub_batch_fallback(texts, conditionals, cfg_weights, temperatures,
                                                     repetition_penalties, min_ps, top_ps)
 
