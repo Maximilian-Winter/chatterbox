@@ -1,27 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- Core Python packages live under ; , , and  expose the primary inference APIs while  contains model-specific utilities.
-- Top-level helper scripts (, , ) demonstrate CLI and Gradio usage; benchmark scripts and  outputs document performance studies.
-- Test entry points (, , ) sit in the repository root alongside sample audio assets (, ) used for smoke checks.
+Chatterbox code lives in ;  and  expose the English and multilingual synthesizers, while  hosts voice conversion flows. Shared tokenizers, schedulers, and diffusers reside under . Example apps (, , , ) demonstrate CLI, batch, and Gradio usage. Benchmarks and reference plots stay beside the scripts that produced them. Tests live in the repository root and reuse bundled audio fixtures (, ) for quick smoke coverage.
 
 ## Build, Test, and Development Commands
--  installs the package in editable mode with all runtime deps from .
--  runs the lightweight unit checks; use  or  to target hardware if needed.
--  executes the heavier integration suite that exercises tokenizer, batching, and voice cloning flows; expect larger model downloads on first run.
--  is a quick sanity check for English TTS; adjust  when using  for multilingual voices.
+Use  to install Chatterbox in editable mode with the pinned dependencies from . Run  for unit coverage; set  or  when you need to target specific accelerators. Execute  to exercise tokenizer and batching paths—first run may download checkpoints, so keep your cache location stable.  generates an English sample; combine  with  to validate multilingual cloning.
 
 ## Coding Style & Naming Conventions
-- Follow PEP 8 with 4-space indents, descriptive snake_case for functions/modules, and CapWords for classes; mirror existing docstring style when adding public APIs.
-- Type hints are expected on new interfaces in , and optional arguments should default to sensible production values.
-- Keep modules small; introduce subpackages inside  when adding model families or tokenizers.
+Follow PEP 8 with four-space indentation, snake_case names for functions and modules, and CapWords for classes. Align docstrings with the existing triple-quoted style used across . Type hints are expected on new interfaces, and optional parameters should default to production-safe values. Keep modules focused; expand within  when introducing new model families or preprocessors.
 
 ## Testing Guidelines
-- Prefer  function-style tests under the repository root; name files  so discovery remains automatic.
-- Mock heavyweight model calls by stubbing  or using small tensors; integration scripts may rely on real checkpoints but gate them behind environment checks.
-- Aim for covering critical audio paths (tokenization, batch scheduling, waveform synthesis) and document any skipped tests with TODOs.
+Keep fast logic in -discoverable functions named . Mock heavyweight components by stubbing  or supplying small tensors; reserve real checkpoint loads for opt-in scripts such as . Capture temporary waveforms under a throwaway directory (e.g., ) and clean them after assertions to avoid polluting the repo.
 
 ## Commit & Pull Request Guidelines
-- Write imperative, informative commit subjects (e.g., ) that summarize the behavior change in 50 characters or less.
-- Link PRs to issues when available, describe user-facing impact, and attach audio diffs or benchmark summaries when behavior shifts.
-- Include validation notes (commands run, hardware used) in PR descriptions so reviewers can reproduce results quickly.
+Write imperative commit subjects like  and aim for ≤50 characters. In pull requests, link related issues, describe user-facing impact, and attach audio diffs or benchmark deltas whenever synthesis quality changes. Document validation steps—commands run, hardware targets, environment variables—so reviewers can reproduce results quickly.
+
+## Environment & Asset Management
+Keep large model weights out of version control; rely on the built-in download utilities and document expected cache directories. Safeguard API keys or premium endpoints by loading them from environment variables rather than hardcoding. When sharing demo outputs, compress waveforms and note the originating commit for traceability.

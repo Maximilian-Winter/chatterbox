@@ -50,6 +50,27 @@ class ConvRNNF0Predictor(nn.Module):
         self.classifier = nn.Linear(in_features=cond_channels, out_features=self.num_class)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Handle edge cases with very small or empty inputs
+        # This can happen when speech tokens are very short (e.g., only start/stop tokens) or empty
+        original_length = x.shape[-1]
+        min_length = 3  # kernel_size
+
+        # Handle completely empty input
+        if original_length == 0:
+            # Return zero tensor with proper shape
+            batch_size = x.shape[0]
+            return torch.zeros(batch_size, 0, device=x.device, dtype=x.dtype)
+
+        if original_length < min_length:
+            # Pad the input to minimum required length
+            pad_amount = min_length - original_length
+            x = torch.nn.functional.pad(x, (0, pad_amount), mode='replicate')
+
         x = self.condnet(x)
         x = x.transpose(1, 2)
+
+        # If we padded the input, trim the output back to original length
+        if original_length < min_length:
+            x = x[:, :original_length, :]
+
         return torch.abs(self.classifier(x).squeeze(-1))
