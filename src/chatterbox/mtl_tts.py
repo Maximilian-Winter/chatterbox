@@ -465,7 +465,7 @@ class ChatterboxMultilingualTTS:
                     use_parallel_generation=batch_size > 1,
                 )
 
-                # Process speech tokens and prepare for S3Gen - FULLY FIXED VERSION
+                # Process speech tokens and prepare for S3Gen - FIXED VERSION
                 processed_speech_tokens = []
                 s3gen_ref_dicts = []
 
@@ -479,49 +479,34 @@ class ChatterboxMultilingualTTS:
                         if speech_tokens.dim() > 1:
                             speech_tokens = speech_tokens.squeeze(0)
 
-                        # Store original tokens count for debugging
-                        original_count = speech_tokens.numel()
+                        # Apply drop_invalid_tokens
+                        speech_tokens_processed = drop_invalid_tokens(speech_tokens)
 
-                        # Apply drop_invalid_tokens - but be very careful with the result
-                        try:
-                            speech_tokens_processed = drop_invalid_tokens(speech_tokens)
+                        # Handle the return value from drop_invalid_tokens
+                        if isinstance(speech_tokens_processed, list):
+                            # If it returns a list, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif isinstance(speech_tokens_processed, tuple):
+                            # If it returns a tuple, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif torch.is_tensor(speech_tokens_processed):
+                            # If it returns a tensor, use it directly
+                            speech_tokens = speech_tokens_processed
+                        else:
+                            # Fallback to original if unexpected return type
+                            warnings.warn(
+                                f"Unexpected return type from drop_invalid_tokens: {type(speech_tokens_processed)}")
 
-                            # Determine what we got back and if it's valid
-                            valid_result = False
-
-                            if isinstance(speech_tokens_processed, list):
-                                if speech_tokens_processed and len(speech_tokens_processed) > 0:
-                                    candidate = speech_tokens_processed[0]
-                                    if torch.is_tensor(candidate) and candidate.numel() > 0:
-                                        speech_tokens = candidate
-                                        valid_result = True
-                            elif isinstance(speech_tokens_processed, tuple):
-                                if speech_tokens_processed and len(speech_tokens_processed) > 0:
-                                    candidate = speech_tokens_processed[0]
-                                    if torch.is_tensor(candidate) and candidate.numel() > 0:
-                                        speech_tokens = candidate
-                                        valid_result = True
-                            elif torch.is_tensor(speech_tokens_processed) and speech_tokens_processed.numel() > 0:
-                                speech_tokens = speech_tokens_processed
-                                valid_result = True
-
-                            if not valid_result:
-                                # drop_invalid_tokens returned empty, DON'T use it
-                                warnings.warn(
-                                    f"drop_invalid_tokens returned empty for item {i} (had {original_count} tokens), skipping drop_invalid_tokens")
-                                # Keep the original tokens unchanged
-
-                        except Exception as e:
-                            warnings.warn(f"drop_invalid_tokens failed for item {i}: {str(e)}, using original tokens")
-                            # Keep the original tokens unchanged
-
-                        # Ensure tensor format
+                        # Ensure tensor
                         if not torch.is_tensor(speech_tokens):
                             speech_tokens = torch.tensor(speech_tokens, device=self.device)
 
-                        # Final check - ensure we have at least some tokens
+                        # Note: For multilingual, we don't filter by vocabulary size (< 6561)
+                        # as the vocabulary might be larger. Just ensure we have valid tokens.
+
+                        # Ensure we have at least some tokens
                         if speech_tokens.numel() == 0:
-                            warnings.warn(f"No valid speech tokens for item {i} after processing, using fallback")
+                            warnings.warn(f"No valid speech tokens for item {i}, using fallback")
                             speech_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
                                                          device=self.device)
 
@@ -610,19 +595,7 @@ class ChatterboxMultilingualTTS:
                     )
 
                     speech_tokens = speech_tokens[0]
-
-                    # Same careful handling for fallback
-                    original_count = speech_tokens.numel()
-                    try:
-                        processed = drop_invalid_tokens(speech_tokens)
-                        if torch.is_tensor(processed) and processed.numel() > 0:
-                            speech_tokens = processed
-                        elif isinstance(processed, (list, tuple)) and processed:
-                            if torch.is_tensor(processed[0]) and processed[0].numel() > 0:
-                                speech_tokens = processed[0]
-                    except:
-                        pass  # Keep original if drop_invalid_tokens fails
-
+                    speech_tokens = drop_invalid_tokens(speech_tokens)
                     speech_tokens = speech_tokens.to(self.device)
 
                     wav, _ = self.s3gen.inference(
@@ -698,17 +671,8 @@ class ChatterboxMultilingualTTS:
             # Extract only the conditional batch.
             speech_tokens = speech_tokens[0]
 
-            # Same careful handling for single generation
-            try:
-                processed = drop_invalid_tokens(speech_tokens)
-                if torch.is_tensor(processed) and processed.numel() > 0:
-                    speech_tokens = processed
-                elif isinstance(processed, (list, tuple)) and processed:
-                    if torch.is_tensor(processed[0]) and processed[0].numel() > 0:
-                        speech_tokens = processed[0]
-            except:
-                pass  # Keep original if drop_invalid_tokens fails
-
+            # TODO: output becomes 1D
+            speech_tokens = drop_invalid_tokens(speech_tokens)
             speech_tokens = speech_tokens.to(self.device)
 
             wav, _ = self.s3gen.inference(
