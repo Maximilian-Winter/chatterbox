@@ -1,15 +1,13 @@
-from chatterbox import ChatterboxTTS, ChatterboxMultilingualTTS
+from chatterbox import ChatterboxTTS
 import torchaudio as ta
 
-tts = ChatterboxMultilingualTTS.from_pretrained("cuda")
+tts = ChatterboxTTS.from_pretrained("cuda")
 
-texts = ["Hello world!", "How are you?", "Batch processing rocks!", "I like Scissors Sixty Nine!"]
+texts = ["Hello world!", "How are you?", "Batch processing rocks!", "I love Scissors Sixty Nine!"]
 audio_paths = ["voice.wav", "voice.wav", "voice.wav", "voice.wav"]
 
-# True batch processing - 3-5x faster!
 outputs = tts.generate_batch(
     texts=texts,
-    language_ids=["en"] * 4,
     audio_prompt_paths=audio_paths,
     max_batch_size=4
 )

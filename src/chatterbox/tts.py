@@ -312,7 +312,7 @@ class ChatterboxTTS:
             exaggerations: Union[float, List[float]] = 0.5,
             cfg_weights: Union[float, List[float]] = 0.5,
             temperatures: Union[float, List[float]] = 0.8,
-            repetition_penalties: Union[float, List[float]] = 1.2,
+            repetition_penalties: Union[float, List[float]] = 2.0,
             min_ps: Union[float, List[float]] = 0.05,
             top_ps: Union[float, List[float]] = 1.0,
             max_batch_size: int = 8,
