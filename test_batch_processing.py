@@ -161,8 +161,20 @@ def test_batch_text_processing():
         adaptive_size = tts._adaptive_batch_size(texts, 8)
         print(f"  ✅ Adaptive batch sizing: {adaptive_size}")
 
+        # Test the actual batch generation method (without audio prompts)
+        if hasattr(tts, 'conds') and tts.conds is not None:
+            try:
+                print("  🧪 Testing batch generation with built-in conditions...")
+                results = tts.generate_batch(texts, max_batch_size=2)
+                print(f"  ✅ Batch generation successful: {len(results)} outputs")
+            except Exception as batch_e:
+                print(f"  ⚠️  Batch generation failed: {batch_e}")
+        else:
+            print("  ℹ️  No built-in conditions available, skipping batch generation test")
+
     except Exception as e:
-        print(f"  ⚠️  ChatterboxTTS test skipped (model not available): {e}")
+        print(f"  ⚠️  ChatterboxTTS test error: {str(e)}")
+        print(f"  🔍 Error type: {type(e).__name__}")
 
 
 def test_multilingual_batch_processing():
@@ -184,8 +196,20 @@ def test_multilingual_batch_processing():
         batch_tokens = mtl_tts._batch_tokenize_texts(texts, language_ids)
         print(f"  ✅ Multilingual batch tokenization: {batch_tokens.shape}")
 
+        # Test batch generation if conditions are available
+        if hasattr(mtl_tts, 'conds') and mtl_tts.conds is not None:
+            try:
+                print("  🧪 Testing multilingual batch generation...")
+                results = mtl_tts.generate_batch(texts, language_ids, max_batch_size=2)
+                print(f"  ✅ Multilingual batch generation successful: {len(results)} outputs")
+            except Exception as batch_e:
+                print(f"  ⚠️  Multilingual batch generation failed: {batch_e}")
+        else:
+            print("  ℹ️  No built-in conditions available, skipping multilingual batch generation test")
+
     except Exception as e:
-        print(f"  ⚠️  Multilingual TTS test skipped (model not available): {e}")
+        print(f"  ⚠️  Multilingual TTS test error: {str(e)}")
+        print(f"  🔍 Error type: {type(e).__name__}")
 
 
 def test_end_to_end_batch_simulation():
