@@ -447,29 +447,80 @@ class S3Token2Wav(S3Token2Mel):
         cache_sources_batch: List[torch.Tensor],
         finalize: bool = True,
     ) -> List[tuple]:
-        """Process a sub-batch for inference."""
-        outputs = []
+        """Process a sub-batch for inference in a batched manner."""
+        batch_size = len(speech_tokens_batch)
+        device = self.device
 
-        for speech_tokens, ref_dict, cache_source in zip(speech_tokens_batch, ref_dicts_batch, cache_sources_batch):
-            try:
-                output_wav, output_source = self.inference(
-                    speech_tokens=speech_tokens,
-                    ref_wav=None,
-                    ref_sr=None,
-                    ref_dict=ref_dict,
-                    cache_source=cache_source,
-                    finalize=finalize,
-                )
-                outputs.append((output_wav, output_source))
+        try:
+            # 1. Pad and batch speech tokens
+            max_len = max(t.shape[-1] for t in speech_tokens_batch)
+            padded_tokens = torch.stack([
+                torch.nn.functional.pad(t, (0, max_len - t.shape[-1]), value=0)
+                for t in speech_tokens_batch
+            ]).to(device)
+            token_lens = torch.LongTensor([t.shape[-1] for t in speech_tokens_batch]).to(device)
 
-            except Exception as e:
-                warnings.warn(f"Failed to process speech tokens in inference: {str(e)}")
-                # Create empty waveform as fallback
-                empty_wav = torch.zeros(1, 1000, device=self.device)
-                empty_source = torch.zeros(1, 1, 0, device=self.device)
-                outputs.append((empty_wav, empty_source))
+            # 2. Batch reference dictionaries
+            max_prompt_token_len = max(d['prompt_token'].shape[-1] for d in ref_dicts_batch)
+            max_prompt_feat_len = max(d['prompt_feat'].shape[1] for d in ref_dicts_batch)
 
-        return outputs
+            batched_ref_dict = {
+                'prompt_token': torch.stack([
+                    torch.nn.functional.pad(d['prompt_token'], (0, max_prompt_token_len - d['prompt_token'].shape[-1]))
+                    for d in ref_dicts_batch
+                ]).squeeze(1).to(device),
+                'prompt_token_len': torch.cat([d['prompt_token_len'] for d in ref_dicts_batch]).to(device),
+                'prompt_feat': torch.stack([
+                    torch.nn.functional.pad(d['prompt_feat'], (0, 0, 0, max_prompt_feat_len - d['prompt_feat'].shape[1]))
+                    for d in ref_dicts_batch
+                ]).squeeze(1).to(device),
+                'embedding': torch.stack([d['embedding'] for d in ref_dicts_batch]).squeeze(1).to(device)
+            }
+
+            # 3. Batched flow inference
+            output_mels, _ = self.flow.inference(
+                token=padded_tokens,
+                token_len=token_lens,
+                finalize=finalize,
+                **batched_ref_dict
+            )
+
+            # 4. Batched hift inference
+            batched_cache_source = torch.zeros(batch_size, 1, 0).to(device)
+            output_wavs, output_sources = self.mel2wav.inference(
+                speech_feat=output_mels,
+                cache_source=batched_cache_source
+            )
+
+            # 5. Apply trim_fade
+            output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
+
+            # 6. Unbatch results
+            results = []
+            for i in range(batch_size):
+                results.append((output_wavs[i:i + 1], output_sources[i:i + 1]))
+            
+            return results
+
+        except Exception as e:
+            warnings.warn(f"Failed to process speech tokens in batched inference: {str(e)}")
+            # Fallback to individual processing if batched fails
+            outputs = []
+            for speech_tokens, ref_dict, cache_source in zip(speech_tokens_batch, ref_dicts_batch, cache_sources_batch):
+                try:
+                    output_wav, output_source = self.inference(
+                        speech_tokens=speech_tokens,
+                        ref_dict=ref_dict,
+                        cache_source=cache_source,
+                        finalize=finalize,
+                    )
+                    outputs.append((output_wav, output_source))
+                except Exception as e_inner:
+                    warnings.warn(f"Fallback processing failed for an item: {str(e_inner)}")
+                    empty_wav = torch.zeros(1, 1000, device=device)
+                    empty_source = torch.zeros(1, 1, 0, device=device)
+                    outputs.append((empty_wav, empty_source))
+            return outputs
 
     def forward(
         self,

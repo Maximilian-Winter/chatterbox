@@ -396,8 +396,7 @@ class ChatterboxTTS:
                     repetition_penalties=repetition_penalties,
                     min_ps=min_ps,
                     top_ps=top_ps,
-                    max_batch_size=batch_size,
-                    use_parallel_generation=True,
+                    max_batch_size=batch_size
                 )
 
                 # 4. Process speech tokens for S3Gen
