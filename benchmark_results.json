@@ -1,0 +1,180 @@
+{
+  "Mock T3 Inference (Single)": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.041999999999999996,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 23.809523809523814
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.105,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 19.047619047619047
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.301,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 13.289036544850498
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.441,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 18.140589569160998
+    },
+    {
+      "batch_size": 16,
+      "processing_time": 0.441,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 36.281179138321995
+    }
+  ],
+  "Mock T3 Inference (Batch)": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.041999999999999996,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 23.809523809523814
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.10500000000000001,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 19.047619047619047
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.301,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 13.289036544850498
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.7056,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 11.337868480725623
+    },
+    {
+      "batch_size": 16,
+      "processing_time": 1.4112,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 11.337868480725623
+    }
+  ],
+  "Mock S3Gen Inference (Single)": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.04000000000000001,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.08000000000000002,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.16000000000000003,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.32000000000000006,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 16,
+      "processing_time": 0.6400000000000001,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    }
+  ],
+  "Mock S3Gen Inference (Batch)": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.04000000000000001,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.08000000000000002,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.16000000000000003,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.32000000000000006,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    },
+    {
+      "batch_size": 16,
+      "processing_time": 0.6400000000000001,
+      "memory_usage": 0,
+      "throughput": 0,
+      "items_per_second": 24.999999999999996
+    }
+  ],
+  "Memory Usage": [
+    {
+      "batch_size": 1,
+      "processing_time": 0.1,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 10.0
+    },
+    {
+      "batch_size": 2,
+      "processing_time": 0.1,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 20.0
+    },
+    {
+      "batch_size": 4,
+      "processing_time": 0.1,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 40.0
+    },
+    {
+      "batch_size": 8,
+      "processing_time": 0.1,
+      "memory_usage": 0.0,
+      "throughput": 0,
+      "items_per_second": 80.0
+    }
+  ]
+}

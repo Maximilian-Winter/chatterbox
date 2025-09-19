@@ -340,7 +340,12 @@ class S3Tokenizer(S3TokenizerV2):
                     mels = [mel[..., :max_len * 4] for mel in mels]  # num_mel_frames = 4 * num_tokens
 
                 # Pad and prepare for quantization
-                padded_mels, mel_lens = padding(mels)
+                try:
+                    padded_mels, mel_lens = padding(mels)
+                except Exception as pad_error:
+                    warnings.warn(f"Padding failed: {pad_error}, falling back to individual processing")
+                    # Fallback to individual processing for this sub-batch
+                    raise pad_error
 
                 # Quantize
                 if accelerator is None:
