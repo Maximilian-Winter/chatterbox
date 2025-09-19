@@ -225,11 +225,15 @@ class ChatterboxTTS:
         normalized_texts = [punc_norm(text) for text in texts]
         token_lists = [self.tokenizer.text_to_tokens(text) for text in normalized_texts]
 
-        max_len = max(len(tokens) for tokens in token_lists)
+        # Extract the actual sequence length from each tokenized output
+        # tokenizer returns [1, seq_len], so we need to squeeze and get the actual length
+        max_len = max(tokens.shape[1] for tokens in token_lists)
         batch_tokens = torch.zeros((len(texts), max_len), dtype=torch.long, device=self.device)
 
         for i, tokens in enumerate(token_lists):
-            batch_tokens[i, :len(tokens)] = tokens.to(self.device)
+            # tokens has shape [1, seq_len], squeeze to get [seq_len]
+            tokens_1d = tokens.squeeze(0).to(self.device)
+            batch_tokens[i, :tokens_1d.shape[0]] = tokens_1d
 
         return batch_tokens
 
