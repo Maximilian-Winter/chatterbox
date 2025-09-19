@@ -3,7 +3,7 @@ import torchaudio as ta
 
 tts = ChatterboxTTS.from_pretrained("cuda")
 
-texts = ["Hello world!", "How are you?", "Batch processing rocks!", "I love Scissors Sixty Nine!"]
+texts = ["Hello world!", "How are you?", "Batch processing rocks!", "I like Scissors Sixty Nine!"]
 audio_paths = ["voice.wav", "voice.wav", "voice.wav", "voice.wav"]
 minps = [0.1, 0.1, 0.1, 0.1]
 tops = [1.0, 0.95, 0.90, 0.85]
