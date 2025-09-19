@@ -20,34 +20,33 @@ from .models.tokenizers import MTLTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
-
 REPO_ID = "ResembleAI/chatterbox"
 
 # Supported languages for the multilingual model
 SUPPORTED_LANGUAGES = {
-  "ar": "Arabic",
-  "da": "Danish",
-  "de": "German",
-  "el": "Greek",
-  "en": "English",
-  "es": "Spanish",
-  "fi": "Finnish",
-  "fr": "French",
-  "he": "Hebrew",
-  "hi": "Hindi",
-  "it": "Italian",
-  "ja": "Japanese",
-  "ko": "Korean",
-  "ms": "Malay",
-  "nl": "Dutch",
-  "no": "Norwegian",
-  "pl": "Polish",
-  "pt": "Portuguese",
-  "ru": "Russian",
-  "sv": "Swedish",
-  "sw": "Swahili",
-  "tr": "Turkish",
-  "zh": "Chinese",
+    "ar": "Arabic",
+    "da": "Danish",
+    "de": "German",
+    "el": "Greek",
+    "en": "English",
+    "es": "Spanish",
+    "fi": "Finnish",
+    "fr": "French",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ms": "Malay",
+    "nl": "Dutch",
+    "no": "Norwegian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "sv": "Swedish",
+    "sw": "Swahili",
+    "tr": "Turkish",
+    "zh": "Chinese",
 }
 
 
@@ -76,17 +75,17 @@ def punc_norm(text: str) -> str:
         ("—", "-"),
         ("–", "-"),
         (" ,", ","),
-        ("“", "\""),
-        ("”", "\""),
-        ("‘", "'"),
-        ("’", "'"),
+        (""", "\""),
+        (""", "\""),
+        ("'", "'"),
+        ("'", "'"),
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
 
     # Add full stop if no ending punc
     text = text.rstrip(" ")
-    sentence_enders = {".", "!", "?", "-", ",","、","，","。","？","！"}
+    sentence_enders = {".", "!", "?", "-", ",", "、", "，", "。", "？", "！"}
     if not any(text.endswith(p) for p in sentence_enders):
         text += "."
 
@@ -138,13 +137,13 @@ class ChatterboxMultilingualTTS:
     DEC_COND_LEN = 10 * S3GEN_SR
 
     def __init__(
-        self,
-        t3: T3,
-        s3gen: S3Gen,
-        ve: VoiceEncoder,
-        tokenizer: MTLTokenizer,
-        device: str,
-        conds: Conditionals = None,
+            self,
+            t3: T3,
+            s3gen: S3Gen,
+            ve: VoiceEncoder,
+            tokenizer: MTLTokenizer,
+            device: str,
+            conds: Conditionals = None,
     ):
         self.sr = S3GEN_SR  # sample rate of synthesized audio
         self.t3 = t3
@@ -199,13 +198,14 @@ class ChatterboxMultilingualTTS:
             snapshot_download(
                 repo_id=REPO_ID,
                 repo_type="model",
-                revision="main", 
-                allow_patterns=["ve.pt", "t3_23lang.safetensors", "s3gen.pt", "mtl_tokenizer.json", "conds.pt", "Cangjie5_TC.json"],
+                revision="main",
+                allow_patterns=["ve.pt", "t3_23lang.safetensors", "s3gen.pt", "mtl_tokenizer.json", "conds.pt",
+                                "Cangjie5_TC.json"],
                 token=os.getenv("HF_TOKEN"),
             )
         )
         return cls.from_local(ckpt_dir, device)
-    
+
     def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
         ## Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
@@ -233,7 +233,8 @@ class ChatterboxMultilingualTTS:
         ).to(device=self.device)
         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
 
-    def _validate_batch_inputs(self, texts: List[str], audio_prompt_paths: Optional[List[str]] = None, language_ids: Optional[List[str]] = None) -> None:
+    def _validate_batch_inputs(self, texts: List[str], audio_prompt_paths: Optional[List[str]] = None,
+                               language_ids: Optional[List[str]] = None) -> None:
         if not isinstance(texts, list) or len(texts) == 0:
             raise ValueError("texts must be a non-empty list of strings")
 
@@ -267,7 +268,7 @@ class ChatterboxMultilingualTTS:
             language_ids = [None] * len(texts)
 
         token_lists = [self.tokenizer.text_to_tokens(text, language_id=lang_id.lower() if lang_id else None)
-                      for text, lang_id in zip(normalized_texts, language_ids)]
+                       for text, lang_id in zip(normalized_texts, language_ids)]
 
         # Extract the actual sequence length from each tokenized output
         # tokenizer returns [1, seq_len], so we need to squeeze and get the actual length
@@ -289,20 +290,21 @@ class ChatterboxMultilingualTTS:
         total_mb = (text_tokens_mem + model_forward_mem + speech_tokens_mem) / (1024 * 1024) * 2
         return total_mb
 
-    def _adaptive_batch_size(self, texts: List[str], max_batch_size: int, language_ids: Optional[List[str]] = None) -> int:
+    def _adaptive_batch_size(self, texts: List[str], max_batch_size: int,
+                             language_ids: Optional[List[str]] = None) -> int:
         normalized_texts = [punc_norm(text) for text in texts]
         if language_ids is None:
             language_ids = [None] * len(texts)
 
         max_text_len = max(len(self.tokenizer.text_to_tokens(text, language_id=lang_id.lower() if lang_id else None))
-                          for text, lang_id in zip(normalized_texts, language_ids))
+                           for text, lang_id in zip(normalized_texts, language_ids))
 
         for batch_size in range(max_batch_size, 0, -1):
             estimated_mem = self._estimate_memory_usage(batch_size, max_text_len)
 
             if torch.cuda.is_available() and self.device != 'cpu':
                 try:
-                    free_mem = torch.cuda.get_device_properties(self.device).total_memory / (1024**3)  # GB
+                    free_mem = torch.cuda.get_device_properties(self.device).total_memory / (1024 ** 3)  # GB
                     if estimated_mem < free_mem * 0.8 * 1024:  # Use 80% of available memory
                         return batch_size
                 except:
@@ -314,9 +316,9 @@ class ChatterboxMultilingualTTS:
         return 1
 
     def prepare_conditionals_batch(
-        self,
-        wav_fpaths: List[str],
-        exaggerations: Union[float, List[float]] = 0.5
+            self,
+            wav_fpaths: List[str],
+            exaggerations: Union[float, List[float]] = 0.5
     ) -> List[Conditionals]:
         if isinstance(exaggerations, (int, float)):
             exaggerations = [float(exaggerations)] * len(wav_fpaths)
@@ -354,18 +356,18 @@ class ChatterboxMultilingualTTS:
         return conditionals
 
     def generate_batch(
-        self,
-        texts: List[str],
-        language_ids: List[str],
-        audio_prompt_paths: Optional[List[str]] = None,
-        exaggerations: Union[float, List[float]] = 0.5,
-        cfg_weights: Union[float, List[float]] = 0.5,
-        temperatures: Union[float, List[float]] = 0.8,
-        repetition_penalties: Union[float, List[float]] = 2.0,
-        min_ps: Union[float, List[float]] = 0.05,
-        top_ps: Union[float, List[float]] = 1.0,
-        max_batch_size: int = 8,
-        return_intermediates: bool = False,
+            self,
+            texts: List[str],
+            language_ids: List[str],
+            audio_prompt_paths: Optional[List[str]] = None,
+            exaggerations: Union[float, List[float]] = 0.5,
+            cfg_weights: Union[float, List[float]] = 0.5,
+            temperatures: Union[float, List[float]] = 0.8,
+            repetition_penalties: Union[float, List[float]] = 2.0,
+            min_ps: Union[float, List[float]] = 0.05,
+            top_ps: Union[float, List[float]] = 1.0,
+            max_batch_size: int = 8,
+            return_intermediates: bool = False,
     ) -> List[torch.Tensor]:
         self._validate_batch_inputs(texts, audio_prompt_paths, language_ids)
 
@@ -415,15 +417,15 @@ class ChatterboxMultilingualTTS:
         return results
 
     def _process_sub_batch(
-        self,
-        texts: List[str],
-        language_ids: List[str],
-        conditionals: List[Conditionals],
-        cfg_weights: List[float],
-        temperatures: List[float],
-        repetition_penalties: List[float],
-        min_ps: List[float],
-        top_ps: List[float]
+            self,
+            texts: List[str],
+            language_ids: List[str],
+            conditionals: List[Conditionals],
+            cfg_weights: List[float],
+            temperatures: List[float],
+            repetition_penalties: List[float],
+            min_ps: List[float],
+            top_ps: List[float]
     ) -> List[torch.Tensor]:
         batch_size = len(texts)
 
@@ -463,16 +465,50 @@ class ChatterboxMultilingualTTS:
                     use_parallel_generation=batch_size > 1,
                 )
 
-                # Process speech tokens and prepare for S3Gen
+                # Process speech tokens and prepare for S3Gen - FIXED VERSION
                 processed_speech_tokens = []
                 s3gen_ref_dicts = []
 
                 for i, speech_tokens in enumerate(speech_tokens_batch):
                     try:
-                        speech_tokens = speech_tokens[0] if speech_tokens.dim() > 1 else speech_tokens
-                        speech_tokens = drop_invalid_tokens(speech_tokens)
-                        if isinstance(speech_tokens, list):
-                            speech_tokens = speech_tokens[0] if speech_tokens else torch.tensor([], device=self.device)
+                        # For multilingual, always extract first sequence (CFG is always used)
+                        if speech_tokens.dim() > 1 and speech_tokens.shape[0] > 1:
+                            speech_tokens = speech_tokens[0]
+
+                        # Ensure speech_tokens is 1D
+                        if speech_tokens.dim() > 1:
+                            speech_tokens = speech_tokens.squeeze(0)
+
+                        # Apply drop_invalid_tokens
+                        speech_tokens_processed = drop_invalid_tokens(speech_tokens)
+
+                        # Handle the return value from drop_invalid_tokens
+                        if isinstance(speech_tokens_processed, list):
+                            # If it returns a list, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif isinstance(speech_tokens_processed, tuple):
+                            # If it returns a tuple, take the first element
+                            speech_tokens = speech_tokens_processed[0] if speech_tokens_processed else speech_tokens
+                        elif torch.is_tensor(speech_tokens_processed):
+                            # If it returns a tensor, use it directly
+                            speech_tokens = speech_tokens_processed
+                        else:
+                            # Fallback to original if unexpected return type
+                            warnings.warn(
+                                f"Unexpected return type from drop_invalid_tokens: {type(speech_tokens_processed)}")
+
+                        # Ensure tensor
+                        if not torch.is_tensor(speech_tokens):
+                            speech_tokens = torch.tensor(speech_tokens, device=self.device)
+
+                        # Note: For multilingual, we don't filter by vocabulary size (< 6561)
+                        # as the vocabulary might be larger. Just ensure we have valid tokens.
+
+                        # Ensure we have at least some tokens
+                        if speech_tokens.numel() == 0:
+                            warnings.warn(f"No valid speech tokens for item {i}, using fallback")
+                            speech_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
+                                                         device=self.device)
 
                         speech_tokens = speech_tokens.to(self.device)
                         processed_speech_tokens.append(speech_tokens)
@@ -481,7 +517,8 @@ class ChatterboxMultilingualTTS:
                     except Exception as e:
                         warnings.warn(f"Failed to process speech tokens for item {i}: {str(e)}")
                         # Create fallback speech tokens
-                        fallback_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token], device=self.device)
+                        fallback_tokens = torch.tensor([self.t3.hp.start_speech_token, self.t3.hp.stop_speech_token],
+                                                       device=self.device)
                         processed_speech_tokens.append(fallback_tokens)
                         s3gen_ref_dicts.append(conditionals[i].gen)
 
@@ -495,8 +532,14 @@ class ChatterboxMultilingualTTS:
 
                 # Process final results
                 results = []
-                for i, (wav, _) in enumerate(s3gen_results):
+                for i, result in enumerate(s3gen_results):
                     try:
+                        # Handle different return formats from S3Gen
+                        if isinstance(result, tuple):
+                            wav, _ = result
+                        else:
+                            wav = result
+
                         wav = wav.squeeze(0).detach().cpu().numpy()
                         watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
                         results.append(torch.from_numpy(watermarked_wav).unsqueeze(0))
@@ -509,18 +552,19 @@ class ChatterboxMultilingualTTS:
         except Exception as e:
             warnings.warn(f"Batch processing failed, falling back to individual processing: {str(e)}")
             # Fallback to individual processing
-            return self._process_sub_batch_fallback(texts, language_ids, conditionals, cfg_weights, temperatures, repetition_penalties, min_ps, top_ps)
+            return self._process_sub_batch_fallback(texts, language_ids, conditionals, cfg_weights, temperatures,
+                                                    repetition_penalties, min_ps, top_ps)
 
     def _process_sub_batch_fallback(
-        self,
-        texts: List[str],
-        language_ids: List[str],
-        conditionals: List[Conditionals],
-        cfg_weights: List[float],
-        temperatures: List[float],
-        repetition_penalties: List[float],
-        min_ps: List[float],
-        top_ps: List[float]
+            self,
+            texts: List[str],
+            language_ids: List[str],
+            conditionals: List[Conditionals],
+            cfg_weights: List[float],
+            temperatures: List[float],
+            repetition_penalties: List[float],
+            min_ps: List[float],
+            top_ps: List[float]
     ) -> List[torch.Tensor]:
         """Fallback to individual processing when batch processing fails."""
         batch_size = len(texts)
@@ -529,7 +573,7 @@ class ChatterboxMultilingualTTS:
         results = []
         for i in range(batch_size):
             try:
-                text_tokens = batch_text_tokens[i:i+1]
+                text_tokens = batch_text_tokens[i:i + 1]
                 text_tokens = text_tokens[text_tokens != 0]  # Remove padding
                 text_tokens = torch.cat([text_tokens.unsqueeze(0), text_tokens.unsqueeze(0)], dim=0)  # CFG for MTL
 
@@ -569,16 +613,16 @@ class ChatterboxMultilingualTTS:
         return results
 
     def generate(
-        self,
-        text,
-        language_id,
-        audio_prompt_path=None,
-        exaggeration=0.5,
-        cfg_weight=0.5,
-        temperature=0.8,
-        repetition_penalty=2.0,
-        min_p=0.05,
-        top_p=1.0,
+            self,
+            text,
+            language_id,
+            audio_prompt_path=None,
+            exaggeration=0.5,
+            cfg_weight=0.5,
+            temperature=0.8,
+            repetition_penalty=2.0,
+            min_p=0.05,
+            top_p=1.0,
     ):
         # Validate language_id
         if language_id and language_id.lower() not in SUPPORTED_LANGUAGES:
@@ -587,7 +631,7 @@ class ChatterboxMultilingualTTS:
                 f"Unsupported language_id '{language_id}'. "
                 f"Supported languages: {supported_langs}"
             )
-        
+
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
@@ -604,7 +648,8 @@ class ChatterboxMultilingualTTS:
 
         # Norm and tokenize text
         text = punc_norm(text)
-        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(self.device)
+        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language_id.lower() if language_id else None).to(
+            self.device)
         text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
 
         sot = self.t3.hp.start_text_token

@@ -3,16 +3,16 @@ Diagnostic script for ChatterboxTTS batch processing
 Traces data flow through the pipeline to identify where audio generation fails
 """
 
-from chatterbox import ChatterboxTTS
+from chatterbox import ChatterboxMultilingualTTS
 import torchaudio as ta
 import torch
 import numpy as np
 
 
-class DiagnosticTTS(ChatterboxTTS):
+class DiagnosticTTS(ChatterboxMultilingualTTS):
     """Wrapper class to add diagnostic logging to batch processing"""
 
-    def _process_sub_batch(self, texts, conditionals, cfg_weights, temperatures,
+    def _process_sub_batch(self, texts, language_ids, conditionals, cfg_weights, temperatures,
                            repetition_penalties, min_ps, top_ps):
         batch_size = len(texts)
         print(f"\n=== Processing sub-batch of {batch_size} items ===")
@@ -156,7 +156,7 @@ class DiagnosticTTS(ChatterboxTTS):
             import traceback
             traceback.print_exc()
             print("Falling back to individual processing...")
-            return self._process_sub_batch_fallback(texts, conditionals, cfg_weights,
+            return self._process_sub_batch_fallback(texts, language_ids,conditionals, cfg_weights,
                                                     temperatures, repetition_penalties, min_ps, top_ps)
 
 
@@ -179,6 +179,7 @@ def main():
 
     outputs = tts.generate_batch(
         texts=texts,
+        language_ids=["en"] * len(texts),
         audio_prompt_paths=audio_paths,
         max_batch_size=4
     )
